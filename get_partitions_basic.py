@@ -16,7 +16,7 @@ from datetime import datetime
 # 日志名称
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_file = f"log\\log_get_partitions_basic_{timestamp}.txt"
-
+'''
 # ===================== 日志处理 =====================
 class Logger(object):
     def __init__(self, filename=log_file):
@@ -47,6 +47,32 @@ class Logger(object):
 log_path = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__), log_file)
 sys.stdout = Logger(log_path)
 sys.stderr = sys.stdout
+'''
+# 自定义 Logger
+logger = logging.getLogger("MyLogger")
+logger.setLevel(logging.DEBUG)  # 捕获所有级别
+
+# 1.文件输出（保存所有日志）
+file_handler = logging.FileHandler(log_file, encoding="utf-8")
+file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)
+
+# 2️.控制台输出（只输出部分信息）
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)  # 只显示 INFO 及以上
+console_formatter = logging.Formatter("[%(levelname)s] %(message)s")
+console_handler.setFormatter(console_formatter)
+logger.addHandler(console_handler)
+
+
+# 3️.替换 print，使 print 也输出到 logger（可选）
+class PrintLogger:
+    def write(self, message):
+        if message.strip():  # 去掉空行
+            logger.info(message.strip())
+    def flush(self):
+        pass
 
 
 class basic_disk_patitions:
@@ -255,10 +281,15 @@ class basic_disk_patitions:
             try:
                 data = json.loads(data_json)
                 for d in data:
-                    #print(f"{d},type(d.get('DiskIndex'))={type(d.get('DiskIndex'))}, type(disk_id)={type(disk_id)}")
+                    logmsg=f"{d},type(d.get('DiskIndex'))={type(d.get('DiskIndex'))}, type(disk_id)={type(disk_id)}, d.get('Type')={d.get('Type')}"
+                    print(logmsg)
+                    logger.debug(logmsg)
                     if str(d.get('DiskIndex'))==str(disk_id) and d.get('Type')=='GPT: System':
                         print(f"[Debug]返回结果：{d.get('DriveLetter')}")
-                        return d.get('DriveLetter').replace(":", "")
+                        if d.get('DriveLetter') != None:
+                            return d.get('DriveLetter').replace(":", "")
+                        else:
+                            return None
             except json.JSONDecodeError as je:
                 #print(f"JSON解析错误: {je}")
                 infomsg=f"JSON Parsing Error: {je}"
