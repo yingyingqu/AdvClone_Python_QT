@@ -88,7 +88,7 @@ class dispart_partition_volume:
     def get_disk_partition_info(self):
         print(f"\n[Info]--- get_disk_partition_info by powershell ---\n")
         """
-        获取所有逻辑分区对应的物理磁盘编号及相关信息
+        获取所有逻辑分区对应的物理磁盘编号及相关信息，没有diskpart volume的编号用于压缩
         返回一个列表，每项包含：
         - DiskNumber
         - PartitionNumber
@@ -205,7 +205,7 @@ class dispart_partition_volume:
 
     def get_disks_type_info(self):
         """ 从 diskpart 的 list disk 输出中解析磁盘编号、大小、是否为动态磁盘 """
-        #是否是动态磁盘判断不准20250928
+        #正则匹配*位置来判断是否是动态磁盘判断不准，只能精确位置来匹配
         script = "list disk\nexit\n"
         output = self.run_diskpart(script)
         disks = {} 
@@ -278,7 +278,7 @@ class dispart_partition_volume:
                 
                 volumes.append({
                     'volume_number': volume_number,
-                    'drive_letter': drive_letter,
+                    'DriveLetter': drive_letter,
                     'label': label,
                     'file_system': file_system,
                     'type': vol_type,
@@ -322,9 +322,9 @@ class dispart_partition_volume:
 
     
     #获取基础磁盘（Basic）的分区详情
-    #使用diskpart命令的原因是，有些分区是reserved分区，powershell下使用Get-Volume也显示不全，但是Get-Partition -DiskNumber 0可以显示完整，
+    #针对basic类型的磁盘，重新获取的原因是，有些分区是reserved分区，powershell下使用Get-Volume也显示不全，但是Get-Partition -DiskNumber 0可以显示完整，（diskpart也可以）
     def get_disk_partitions_basic(self, disk_id):
-        ps_cmd = f"""Get-Partition -DiskNumber {disk_id} | Select-Object PartitionNumber, DriveLetter, Offset, Guid, Type | ConvertTo-Json -Compress"""
+        ps_cmd = f"""Get-Partition -DiskNumber {disk_id} | Select-Object PartitionNumber, DriveLetter, Offset, Size, Guid, Type | ConvertTo-Json -Compress"""
         try:
             output=self.run_powershell(ps_cmd)
             print(type(output),output)
@@ -369,26 +369,66 @@ class dispart_partition_volume:
             type_disk = disk_type_info[t]["DiskType"]
             print("type:",type_disk)
             merger_disks_partitions[t]["DiskType"]=type_disk
-        print(f"[Debug](2)merger_disks_partitions is:\n{merger_disks_partitions}")
-        
+        print(f"[Debug](2)merger_disks_partitions (add disk type)is:\n{merger_disks_partitions}")
+
+
         volumes = self.get_volumes_diskpart()
         print(f"[Debug]get_volumes_diskpart volumes is:\n{volumes}")
-        for v in volumes:
+        for vid in range(len(volumes)):
+            print(f"[Debug]{type(vid)} vid={vid}")
+            v=volumes[vid]
             num = str(v['DiskNumber'])
             print(f"xxxx\n{type(num)}, {num}\n")
             merger_disks_partitions[num]['Volumes'].append(v)
         print(f"[Debug](3)merger_disks_partitions is:\n{merger_disks_partitions}")
-        
-        '''
-        #对get_volumes_diskpart没有获取到的分区进行补充，比如reserved等分区
+
+
+
         for m in merger_disks_partitions:
             type_disk=merger_disks_partitions[m]["DiskType"]
+            # 对get_volumes_diskpart没有获取到的分区进行补充，比如reserved等分区
             if type_disk == "Basic":
-                partitions = self.get_disk_partitions_basic(m)
-        '''        
+                basic_partitons = self.get_disk_partitions_basic(m)
+                print(f"[Debug]get_disk_partitions_basic :{basic_partitons}")
+                for bp in basic_partitons:
+                    bp_letter = bp.get("DriveLetter")
+                    bp_info = bp.get("Type")
+                    print(f"[Debug]bp.get('DriveLetter')={bp.get('DriveLetter')}, bp.get('Type')={bp_info}")
+                    for mp_index in range(len(merger_disks_partitions[m]["Volumes"])):
+                        mp=merger_disks_partitions[m]["Volumes"][mp_index]
+                        print(f"---[Debug]mp.get('DriveLetter')={mp.get('DriveLetter')}, mp.get('info')={mp.get('info')}")
+                        if mp.get("DriveLetter"):
+                            if mp.get("DriveLetter")==bp_letter:
+                                integrated = mp.copy()     # 以卷数据为基础
+                                integrated.update(bp)  # 用分区数据更新
+                                merger_disks_partitions[m]["Volumes"][mp_index]=integrated
+                                break
+                        else:
+                            if mp.get("info")==bp_info:
+                                integrated = mp.copy()  # 以卷数据为基础
+                                integrated.update(bp)  # 用分区数据更新
+                                merger_disks_partitions[m]["Volumes"][mp_index] = integrated
+                                break
+                            else:
+                                merger_disks_partitions[m]["Volumes"].append(bp)
+                print(f"[Debug](4)补充diskpart list volume没有列举获取到的分区\n{merger_disks_partitions}")
+            if type_disk == "Dynamic":
+                # 补充动态磁盘各个分区的偏移地址和大小size信息
+                tmp_info = self.get_disk_partition_info()
+                print(f"[Debug]get_disk_partition_info() :{tmp_info}")
+                pass
+
+
+
+
+
+
+        print(f"[Debug](5)补充动态磁盘各个分区的偏移地址\n")
+        '''
         volumes = self.get_volumes_ps()
         print(volumes)
-        
+        '''
+    '''   
     def get_all_disks_partitons(self):
         # 获取所有磁盘的分区详情
         disks_nums = self.get_hard_disk_numbers()
@@ -430,7 +470,7 @@ class dispart_partition_volume:
         }
         self.sys_disk_info.append(sys_disk_info)
         return self.sys_disk_info
-        
+    '''
 
 # 使用示例
 manager = dispart_partition_volume()

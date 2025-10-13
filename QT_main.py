@@ -1,42 +1,60 @@
 # -*- coding:utf-8 -*-
-import os, datetime, sys, re
+import os, sys, re
 import json
 import subprocess
+from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel,
-    QPushButton, QTreeWidget, QTreeWidgetItem, QMessageBox,QLineEdit, 
+    QPushButton, QTreeWidget, QTreeWidgetItem, QMessageBox,QLineEdit,
     QHBoxLayout, QStackedWidget, QFrame, QSplitter, QProgressBar, QApplication, QTextEdit
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal,QProcess
-from PyQt5.QtGui import QFont, QIntValidator
+from PyQt5.QtCore import Qt, QSettings, QThread, pyqtSignal,QProcess
+from PyQt5.QtGui import  QFont, QIntValidator
 
-from get_partions_volumes import dispart_partition_volume
-'''
+from get_partitions_basic import basic_disk_patitions
+
+# 日志名称
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_file = f"log\\log_QT_{timestamp}.txt"
 # ===================== 日志处理 =====================
 class Logger(object):
-    def __init__(self, filename="log.txt"):
-        self.terminal = sys.stdout
+    def __init__(self, filename=log_file):
+        # 尝试获取原 stdout
+        self.terminal = getattr(sys, "__stdout__", None)
         self.log = open(filename, "a", encoding="utf-8")
 
     def write(self, message):
-        self.terminal.write(message)   # 控制台显示
-        self.log.write(message)        # 写入文件
-        self.log.flush()               # 实时刷新
+        # 写入控制台（如果有）
+        if self.terminal:
+            try:
+                self.terminal.write(message)
+            except Exception:
+                pass
+        # 写入日志文件
+        if self.log:
+            self.log.write(message)
+            self.log.flush()
 
     def flush(self):
-        pass  # print 会调用 flush，这里留空即可
+        if self.terminal:
+            try:
+                self.terminal.flush()
+            except Exception:
+                pass
+        if self.log:
+            self.log.flush()
+log_path = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__), log_file)
+sys.stdout = Logger(log_path)
+sys.stderr = sys.stdout
 
-sys.stdout = Logger("log.txt")
-sys.stderr = sys.stdout  # 错误也记录
-'''
 
 # ---------- 第1页 ----------
 class PartitionSelectorPage(QWidget):
-    def __init__(self, all_disks, next_callback):
+    def __init__(self, all_disks, next_callback, compress_rate):
         super().__init__()
         self.all_disks = all_disks
         self.next_callback = next_callback
-        self.compress_rate = 1.5
+        self.compress_rate = compress_rate
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20,20,20,20)
@@ -69,19 +87,22 @@ class PartitionSelectorPage(QWidget):
         # 遍历磁盘和分区
         self.partition_items = []
 
-        for disk in all_disks:
-            disk_item = QTreeWidgetItem([disk["Disk"]])
+        for key in all_disks:
+            disk=all_disks.get(key)
+            disk_item = QTreeWidgetItem(self.tree)
             disk_item.setFlags(disk_item.flags() & ~Qt.ItemIsSelectable)
             self.tree.addTopLevelItem(disk_item)
             partitons_info = disk["Partitions"]
             # 按盘符或 OffsetBytes 排序
-            partitons_info.sort(key=lambda p: (p.get('drive_letter') or '', p.get('OffsetBytes', 0)))
+            partitons_info.sort(key=lambda p: (p.get('OffsetBytes', 0)))
             for part in partitons_info:
+                print("[Debug]", part)
                 label = str(part.get("label","") or "")
                 part_info = f"{part.get('Type','')} ({part.get('drive_letter','')}:)" if part.get('drive_letter') else part.get('Type','')
-                size = f"{part.get('size','')} {part.get('size_unit','')}"
+                #size = f"{part.get('size','')} {part.get('size_unit','')}"
+                size = f"{self.format_size_auto(part.get('used_bytes', 0))}"
                 free = f"{part.get('free_bytes',0)/1024**3:.2f} GB" if part.get('free_bytes') else ""
-                item = QTreeWidgetItem([part_info,label,part.get('file_system',''),size,free,str(part.get("info",""))])
+                item = QTreeWidgetItem([part_info,label,part.get('FileSystem',''),size,free,str(part.get("info",""))])
                 item.setData(0, Qt.UserRole, part)  # 绑定分区数据
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 if label.lower() == "advclone":
@@ -101,7 +122,17 @@ class PartitionSelectorPage(QWidget):
         card_layout.addWidget(btn_next,alignment=Qt.AlignRight)
 
         layout.addWidget(card)
-
+        
+        
+    def format_size_auto(self, size_bytes):
+        if size_bytes <= 0:
+            return ""
+        units = [(1024**3, "GB"), (1024**2,"MB"),(1024,"KB"),(1,"B")]
+        for threshold, unit in units:
+            if size_bytes >= threshold:
+                size = size_bytes / threshold
+                return f"{size:.2f} {unit}"
+        return f"{size_bytes} B"
     def go_next(self):
         print("======[Debug]page1: go_next======")
         selected = []
@@ -121,22 +152,26 @@ class PartitionSelectorPage(QWidget):
             return
 
         # 检查是否存在 advclone 分区且空间不足
-        for disk in self.all_disks:
+        for d in self.all_disks:
+            disk=self.all_disks.get(d)
             for part in disk["Partitions"]:
                 if (part.get("label") or "").lower() == "advclone":
                     # 计算已选择总大小
-                    total_used_bytes = sum(p.get("used_bytes",0) or p.get("size_bytes",0) for p in selected)
-                    need_bytes = int(total_used_bytes / float(self.compress_rate)) #所需空间补上advclone自身系统占用空间
-                    advclone_size_bytes = part.get("size_bytes",0)
-                    advclone_available_size_bytes = advclone_size_bytes - 730*1024*1024 #可用有效空间，去掉advclone自身系统占用空间
-                    print(f"[Debug]total_used_bytes={total_used_bytes}, need_bytes={need_bytes},advclone_size_bytes={advclone_size_bytes}，advclone_available_size_bytes={advclone_available_size_bytes} ")
-                    if advclone_available_size_bytes < need_bytes:
-                        drive = part.get("drive_letter","")
-                        mesg = f"""  已有 advclone 分区 ({drive}) 空间不足\n  被选分区已用空间总大小{total_used_bytes} bytes\n  我们需要{need_bytes} bytes\n  但是advclone只用{advclone_size_bytes} bytes\n  请删除或扩展该分区后重新创建。"""
-                        QMessageBox.warning(self,"提示",mesg)
-                        print(mesg)
-                        return  # 停留在第一页
-
+                    try:
+                        total_used_bytes = sum(p.get("used_bytes",0) or p.get("size_bytes",0) for p in selected)
+                        need_bytes = int(total_used_bytes / float(self.compress_rate)) #所需空间补上advclone自身系统占用空间
+                        advclone_size_bytes = part.get("size_bytes",0)
+                        advclone_available_size_bytes = advclone_size_bytes - 730*1024*1024 #可用有效空间，去掉advclone自身系统占用空间
+                        print(f"[Debug]total_used_bytes={total_used_bytes}, need_bytes={need_bytes},advclone_size_bytes={advclone_size_bytes}，advclone_available_size_bytes={advclone_available_size_bytes} ")
+                        if advclone_available_size_bytes < need_bytes:
+                            drive = part.get("drive_letter","")
+                            mesg = f"""  已有 advclone 分区 ({drive}) 空间不足\n  被选分区已用空间总大小{total_used_bytes} bytes\n  我们需要{need_bytes} bytes\n  但是advclone只用{advclone_size_bytes} bytes\n  请删除或扩展该分区后重新创建。"""
+                            QMessageBox.warning(self,"提示",mesg)
+                            print(mesg)
+                            return  # 停留在第一页
+                    except Exception as e:
+                        print(f"执行出错: {e}")
+                        return {e}
         # 正常跳转第二页
         self.next_callback(selected)
 
@@ -172,7 +207,8 @@ class ConfirmSelectionPage(QWidget):
         card_layout.addWidget(self.info_label)
 
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Name","Label","FS","Size","Used","Free","Info"])
+        #self.tree.setHeaderLabels(["Name","Label","FS","Size","Used","Free","Info"])
+        self.tree.setHeaderLabels(["Name","Size","Used","Free","Info"])
         self.tree.setColumnWidth(0, 200)   # Name列：200像素
         self.tree.setColumnWidth(0, 200)
         self.tree.setAnimated(True)
@@ -206,7 +242,7 @@ class ConfirmSelectionPage(QWidget):
 
     def format_size_auto(self, size_bytes):
         if size_bytes <= 0:
-            return "0 B"
+            return ""
         units = [(1024**3, "GB"), (1024**2,"MB"),(1024,"KB"),(1,"B")]
         for threshold, unit in units:
             if size_bytes >= threshold:
@@ -229,14 +265,15 @@ class ConfirmSelectionPage(QWidget):
         self.size_input.setText(str(int(input_default_mb+1)))
 
         self.tree.clear()
+
         # 已选备份分区
         root1 = QTreeWidgetItem(["已选择备份分区"])
         root1.setFlags(root1.flags() & ~Qt.ItemIsSelectable)
         self.tree.addTopLevelItem(root1)
         for part in selected_first_page:
             info = f"{part.get('Type','')} ({part.get('drive_letter','')}:)" if part.get('drive_letter') else part.get('Type','')
-            item = QTreeWidgetItem([info,str(part.get("label","") or ""),part.get('file_system',''),
-                                     f"{part.get('size','')} {part.get('size_unit','')}",
+            item = QTreeWidgetItem([info,
+                                     f"{self.format_size_auto(part.get('size_bytes', 0))}",
                                      f"{part.get('used_bytes',0)/1024**3:.2f} GB" if part.get('used_bytes') else "",
                                      f"{part.get('free_bytes',0)/1024**3:.2f} GB" if part.get('free_bytes') else "",
                                      str(part.get("info",""))])
@@ -250,8 +287,11 @@ class ConfirmSelectionPage(QWidget):
         self.tree.addTopLevelItem(root2)
         advclone_found = False
         self.selected_advclone_storage=[]
-        for disk in self.all_disks:
-            disk_item = QTreeWidgetItem([disk["Disk"]])
+        for d in self.all_disks:
+            disk=self.all_disks.get(d)
+            title_key='disk%s'%d
+            title={title_key:disk.get('FriendlyName')}
+            disk_item = QTreeWidgetItem(title)
             disk_item.setFlags(disk_item.flags() & ~Qt.ItemIsSelectable)
             root2.addChild(disk_item)
             # 找到advclone分区，默认选择它，其他不可选
@@ -259,10 +299,11 @@ class ConfirmSelectionPage(QWidget):
                 label_lower = (part.get("label") or "").lower()
                 print(f"[Debug]Finding advclone...\n{part}")
                 if label_lower == "advclone":
+                    print(f"[Debug]Finded advclone...\n")
                     advclone_found = True
                     self.selected_advclone_storage = [part]
-                    item = QTreeWidgetItem([f"{part.get('Type','')} ({part.get('drive_letter','')})",part.get("label") or "",part.get("file_system",""),
-                                            f"{part.get('size','')} {part.get('size_unit','')}",
+                    item = QTreeWidgetItem([f"{part.get('Type','')} ({part.get('drive_letter','')})",
+                                            f"{self.format_size_auto(part.get('size_bytes', 0))}",
                                             f"{part.get('used_bytes',0)/1024**3:.2f} GB",
                                             f"--",
                                             str(part.get("info",""))])
@@ -272,8 +313,7 @@ class ConfirmSelectionPage(QWidget):
                     disk_item.addChild(item)
                     self.partition_forbackup_items.append(part)
                     break
-                print(f"advclone_found={advclone_found}")
-                
+                print(f"advclone_found={advclone_found}")   
             if advclone_found == False:         
                 for part in disk["Partitions"]:
                     free_bytes = part.get("free_bytes",0)
@@ -281,9 +321,9 @@ class ConfirmSelectionPage(QWidget):
                     # 其他分区，如果 free_bytes >= need_bytes 才能选
                     if free_bytes and free_bytes >= int(self.need_bytes*1.05):
                         label = part.get("label") or ""
-                        part_info = f"{part.get('Type','')} ({part.get('drive_letter','')}:)" if part.get('drive_letter') else part.get('Type','')
-                        item = QTreeWidgetItem([part_info,
-                                                f"{part.get('size','')} {part.get('size_unit','')}",
+                        #part_info = f"{part.get('Type','')} ({part.get('drive_letter','')}:)" if part.get('drive_letter') else part.get('Type','')
+                        item = QTreeWidgetItem([f"{part.get('Type','')} ({part.get('drive_letter','')})",
+                                                f"{self.format_size_auto(part.get('size_bytes', 0))}",
                                                 f"{part.get('used_bytes',0)/1024**3:.2f} GB",
                                                 f"{free_bytes/1024**3:.2f} GB",
                                                 str(part.get("info",""))])
@@ -317,15 +357,19 @@ class ConfirmSelectionPage(QWidget):
             return
 
         # 遍历 storage_root 下的磁盘节点和分区节点，收集被勾选的
+        print(storage_root.childCount())
         for d in range(storage_root.childCount()):
+            print(f"debug{d}")
             disk_item = storage_root.child(d)
+            print(f"debug: disk_item={disk_item}")
             for p in range(disk_item.childCount()):
                 item = disk_item.child(p)
+                print(f"[Debug]check: {item}")
                 if item.checkState(0) == Qt.Checked:
                     part = item.data(0, Qt.UserRole)
                     if part:
                         self.selected_storage.append(part)
-                        
+               
         print("self.selected_storage:",self.selected_storage)
         if not self.selected_storage:
             QMessageBox.warning(self,"提示","请选择一个存储分区用于备份！")
@@ -343,34 +387,7 @@ class ConfirmSelectionPage(QWidget):
 
         self.next_callback(self.selected_first_page, self.selected_storage, size_mb)
 
-# ---------- 第3页执行线程 ----------
-'''
-# ---------- 执行线程 ----------
-class ExecThread(QThread):
-    progress = pyqtSignal(int)
-    finished = pyqtSignal(bool, str)  # 成功与否, 信息
 
-    def __init__(self, cmd):
-        super().__init__()
-        self.cmd = cmd
-
-    def run(self):
-        try:
-            # 这里使用 Popen 调用外部程序
-            # stdout/stderr 可根据实际需求读取并更新进度
-            proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            # 简单模拟进度
-            for i in range(101):
-                self.msleep(50)  # 模拟等待
-                self.progress.emit(i)
-            proc.wait()
-            if proc.returncode == 0:
-                self.finished.emit(True, "外部程序执行完成！")
-            else:
-                self.finished.emit(False, f"程序返回错误码: {proc.returncode}")
-        except Exception as e:
-            self.finished.emit(False, str(e))
-'''
 # ---------- 第3页 ----------
 class ExecutionPage(QWidget):
     def __init__(self, back_callback):
@@ -441,52 +458,148 @@ class ExecutionPage(QWidget):
 
         backup_info = "\n".join([f"{p.get('Type')} ({p.get('drive_letter','')}): {p.get('size','')}{p.get('size_unit','')}" for p in selected_backup])
         storage_info = "\n".join([f"{p.get('Type')} ({p.get('drive_letter','')}): {p.get('free_bytes',0)/1024**3:.2f} GB 可用" for p in selected_storage])
-        self.info_label.setText(
-            f"已选择备份分区:\n{backup_info}\n\n待压缩空间分区:\n{storage_info}\n\n压缩分区大小: {self.shrink_space_mb} MB"
-        )
+        for p in selected_storage:
+            try:
+                label=p.get('label')
+                if label == 'advclone':
+                    message=f"已选择备份分区:\n{backup_info}\n\nadvclone已存在，且空间大下为:\n{storage_info}\n\n备份所需空间大小: {self.shrink_space_mb} MB\n"
+                else:
+                    message=f"已选择备份分区:\n{backup_info}\n\n待压缩空间分区:\n{storage_info}\n\n压缩分区大小: {self.shrink_space_mb} MB"
+            except Exception as e:
+                print(f"执行出错: {e}")
+                return {e}
+        self.info_label.setText(message)
         self.progress_bar.setValue(0)
 
     def start_exec(self):
         print("======[Debug]page3: start_exec======")
-        if not self.save_path or not os.path.exists(self.save_path):
-            QMessageBox.warning(self,"错误","配置文件不存在！")
-            return
+        try:
+            script_path = os.path.join(os.getcwd(), r"run_prepare_grub_env.exe")
+            if not os.path.exists(script_path):
+                QMessageBox.warning(self, "错误", f"脚本文件不存在！\n路径: {script_path}")
+                return
 
-        # 禁用按钮
-        self.btn_exec.setEnabled(False)
-        self.btn_back.setEnabled(False)
-        self.info_label.setText("执行中，请等待...")
+            # 检查是否已有进程在运行
+            if hasattr(self, 'process') and self.process and self.process.state() == QProcess.Running:
+                QMessageBox.information(self, "提示", "已有程序正在运行，请等待完成。")
+                return
 
-        # 启动外部程序
-        self.process = QProcess(self)
-        #self.process.setProgram("notepad.exe")  # 这里替换为你的外部程序
-        #self.process.setArguments([self.save_path])
-        self.process.setProgram(sys.executable)  # Python 解释器
-        self.process.setWorkingDirectory(r"D:\QT\20250926")
-        self.process.setArguments([r"D:\QT\20250926\prepare_grub_env.py"])
-        self.process.readyReadStandardOutput.connect(self.handle_stdout)
-        self.process.readyReadStandardError.connect(self.handle_stderr)
-        self.process.finished.connect(self.process_finished)
-        self.process.errorOccurred.connect(lambda e: print("QProcess error:", e))
-        self.process.start()
+            # 禁用按钮
+            self.btn_exec.setEnabled(False)
+            self.btn_back.setEnabled(False)
+            #self.btn_cancel.setEnabled(True)  # 添加取消按钮
+            self.info_label.setText("执行中，请等待...")
+            self.output_text.clear()
 
-        # 模拟进度条
-        self.progress_bar.setValue(10)
+            # 启动外部程序
+            self.process = QProcess(self)
+            self.process.setProgram(script_path)
+            self.process.setWorkingDirectory(os.getcwd())
+            
+            # 连接所有信号
+            self.process.readyReadStandardOutput.connect(self.handle_stdout)
+            self.process.readyReadStandardError.connect(self.handle_stderr)
+            self.process.finished.connect(self.process_finished)
+            self.process.errorOccurred.connect(self.handle_process_error)
+            self.process.started.connect(lambda: print("进程已启动"))
+            
+            # 启动进程
+            self.process.start()
+            
+            if not self.process.waitForStarted(5000):  # 等待5秒启动
+                raise Exception("进程启动超时")
+                
+            self.progress_bar.setValue(10)
+            
+        except Exception as e:
+            print(f"启动进程时出错: {e}")
+            QMessageBox.critical(self, "错误", f"启动进程失败: {str(e)}")
+            self.reset_buttons()
 
-    def handle_stdout(self):
-        output = self.process.readAllStandardOutput().data().decode("utf-8").strip()
-        if output:
-            self.output_text.append(output)
-            print(output) 
+    def process_finished(self, exit_code, exit_status):
+        """进程执行完成"""
+        print(f"进程完成 - 退出代码: {exit_code}, 状态: {exit_status}")
         
-        # 模拟进度条增加
-        value = self.progress_bar.value() + 10
-        self.progress_bar.setValue(min(value, 90))
+        # 完成进度条
+        self.progress_bar.setValue(100)
+        
+        # 根据退出代码显示不同消息
+        if exit_code == 0:
+            success_msg = "外部程序执行成功！"
+            self.info_label.setText(success_msg)
+            
+            # 询问用户是否继续
+            reply = QMessageBox.question(
+                self, 
+                "完成", 
+                f"{success_msg}\n\n点击 Yes 退出程序，点击 No 继续使用。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                QApplication.quit()  # 只有用户确认时才退出
+            else:
+                self.reset_buttons()
+                
+        else:
+            error_msg = f"外部程序执行失败！退出代码: {exit_code}"
+            self.info_label.setText(error_msg)
+            QMessageBox.warning(self, "失败", error_msg)
+            self.reset_buttons()
 
-    def handle_stderr(self):
-        output = bytes(self.process.readAllStandardError()).decode("utf-8")
-        self.output_text.append(f"错误: {output}")
+    def reset_buttons(self):
+        """重置按钮状态"""
+        self.btn_exec.setEnabled(True)
+        self.btn_back.setEnabled(True)
+        if hasattr(self, 'btn_cancel'):
+            self.btn_cancel.setEnabled(False)
 
+    def cancel_execution(self):
+        """取消执行"""
+        if hasattr(self, 'process') and self.process and self.process.state() == QProcess.Running:
+            reply = QMessageBox.question(
+                self, 
+                "确认取消", 
+                "确定要终止正在运行的程序吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.process.terminate()
+                if not self.process.waitForFinished(5000):  # 等待5秒
+                    self.process.kill()  # 强制终止
+                self.info_label.setText("执行已取消")
+                self.reset_buttons()
+    '''
+    def start_exec(self):
+        print("======[Debug]page3: start_exec======")
+        try:
+            script_path = os.path.join(os.getcwd(), r"run_prepare_grub_env.exe")
+            if not os.path.exists(script_path):
+                QMessageBox.warning(self, "错误", f"脚本文件不存在！\n路径: {script_path}")
+                return
+
+
+            # 禁用按钮
+            self.btn_exec.setEnabled(False)
+            self.btn_back.setEnabled(False)
+            self.info_label.setText("执行中，请等待...")
+
+            # 启动外部程序
+            self.process = QProcess(self)
+            #self.process.setProgram("notepad.exe")  # 这里替换为你的外部程序
+            self.process.setProgram(script_path) 
+            self.process.readyReadStandardOutput.connect(self.handle_stdout)
+            self.process.readyReadStandardError.connect(self.handle_stderr)
+            self.process.finished.connect(self.process_finished)
+            self.process.errorOccurred.connect(lambda e: print("QProcess error:", e))
+            self.process.start()
+
+            # 模拟进度条
+            self.progress_bar.setValue(10)
+        except Exception as e:
+            print(f"处理标准输出时出错: {e}")
     def process_finished(self):
         self.progress_bar.setValue(100)
         self.btn_exec.setEnabled(True)
@@ -494,9 +607,44 @@ class ExecutionPage(QWidget):
         self.info_label.setText("外部程序执行完成！")
         #QMessageBox.information(self, "完成", "外部程序执行完成！")
         reply = QMessageBox.information(self, "完成", "外部程序执行完成！点击 OK 退出程序。")
-        QApplication.quit()
-        
+        #QApplication.quit()
+    '''
+    def handle_stdout(self):
+        try:
+            data = self.process.readAllStandardOutput()
+            output = data.data().decode("utf-8", errors="ignore").strip()
+            if output:
+                self.output_text.append(output)
+                print(f"STDOUT: {output}") 
+            
+            # 模拟进度条增加
+            current_value = self.progress_bar.value()
+            if current_value < 90:
+                self.progress_bar.setValue(current_value + 5)
+                
+        except Exception as e:
+            print(f"处理标准输出时出错: {e}")
 
+    def handle_stderr(self):
+        try:
+            data = self.process.readAllStandardError()
+            output = data.data().decode("utf-8", errors="ignore").strip()
+            if output:
+                self.output_text.append(f"<font color='red'>错误: {output}</font>")
+                print(f"STDERR: {output}")
+        except Exception as e:
+            print(f"处理标准错误时出错: {e}")
+
+    def handle_process_error(self, error):
+        """处理进程错误"""
+        error_msg = f"进程错误: {error}"
+        print(error_msg)
+        self.output_text.append(f"<font color='red'>{error_msg}</font>")
+        self.reset_buttons()
+
+
+        
+    
 
 # ---------- 主向导 ----------
 class BackupWizard(QMainWindow):
@@ -504,7 +652,7 @@ class BackupWizard(QMainWindow):
         super().__init__()
         self.setWindowTitle("AdvClone 备份向导")
         self.resize(1000,600)
-
+        self.settings = None
         splitter = QSplitter()
         splitter.setHandleWidth(1)
         self.setCentralWidget(splitter)
@@ -531,9 +679,9 @@ class BackupWizard(QMainWindow):
         splitter.setStretchFactor(1,5)
 
         self.all_disks = all_disks
-        self.compress_rate = 1.5
+        self.compress_rate = self.getConfigValue('COMPRESSRATE','rate')
 
-        self.page1 = PartitionSelectorPage(all_disks, self.go_to_confirm)
+        self.page1 = PartitionSelectorPage(all_disks, self.go_to_confirm, self.compress_rate)
         self.page2 = ConfirmSelectionPage(self.go_to_select, self.go_to_exec, all_disks, self.compress_rate)
         self.page3 = ExecutionPage(self.go_to_confirm_back)
 
@@ -542,6 +690,15 @@ class BackupWizard(QMainWindow):
         self.stack.addWidget(self.page3)
 
         self.update_steps(0)
+        
+    def getConfigValue(self, section, key, default_value=None):
+        """通用的配置读取方法"""
+        if self.settings is None:
+            self.settings = QSettings('config.ini', QSettings.IniFormat)
+        
+        # 构建完整的键路径
+        full_key = f'{section}/{key}'
+        return self.settings.value(full_key, default_value)
 
     def update_steps(self,index):
         for i,lbl in enumerate(self.step_labels):
@@ -558,7 +715,7 @@ class BackupWizard(QMainWindow):
         self.update_steps(0)
 
     def go_to_exec(self, selected_first_page, selected_storage, shrink_space_mb):
-        current_time = datetime.datetime.now()
+        current_time = datetime.now()
         #filename = f"backup_selected_partitions_{current_time.strftime('%Y%m%d_%H%M%S')}.json"
         filename = f"selected_partitions.json"
         self.save_path = os.path.join(os.getcwd(),filename)
@@ -579,13 +736,8 @@ class BackupWizard(QMainWindow):
 # ---------- 运行 ----------
 if __name__=="__main__":
     import sys
-    '''
-    # 模拟磁盘数据
-    all_disks_0 = [{'Disk': 'Disk 0', 'Partitions': [{'PartitionNumber': '1', 'Type': 'System', 'VolumeNumber': 0, 'drive_letter': '', 'label': None, 'file_system': 'FAT32', 'type': 'Partition', 'size': '600', 'size_unit': 'MB', 'status': 'Healthy', 'info': 'Hidden', 'size_bytes': 629145600, 'OffsetBytes': 1048576, 'SortedOffsetIndex': 1, 'free_bytes': None, 'used_bytes': None}, {'PartitionNumber': '2', 'Type': 'Unknown', 'OffsetBytes': 630194176, 'SortedOffsetIndex': 2, 'free_bytes': None, 'used_bytes': None}, {'PartitionNumber': '3', 'Type': 'Unknown', 'OffsetBytes': 1703936000, 'SortedOffsetIndex': 3, 'free_bytes': None, 'used_bytes': None}]}, {'Disk': 'Disk 1', 'Partitions': [{'PartitionNumber': '1', 'Type': 'System', 'VolumeNumber': 4, 'drive_letter': 'E', 'label': None, 'file_system': 'FAT32', 'type': 'Partition', 'size': '100', 'size_unit': 'MB', 'status': 'Healthy', 'info': 'System', 'size_bytes': 104857600, 'OffsetBytes': 1048576, 'SortedOffsetIndex': 1, 'free_bytes': 72510464, 'used_bytes': 28152832}, {'PartitionNumber': '2', 'Type': 'Reserved', 'OffsetBytes': 105906176, 'SortedOffsetIndex': 2, 'free_bytes': None, 'used_bytes': None}, {'PartitionNumber': '3', 'Type': 'Primary', 'VolumeNumber': 1, 'drive_letter': 'C', 'label': None, 'file_system': 'NTFS', 'type': 'Partition', 'size': '237', 'size_unit': 'GB', 'status': 'Healthy', 'info': 'Boot', 'size_bytes': 254476812288, 'OffsetBytes': 122683392, 'SortedOffsetIndex': 3, 'free_bytes': 189623177216, 'used_bytes': 65256263680}, {'PartitionNumber': '6', 'Type': 'Primary', 'VolumeNumber': 2, 'drive_letter': 'F', 'label': 'advclone', 'file_system': 'NTFS', 'type': 'Partition', 'size': '40', 'size_unit': 'GB', 'status': 'Healthy', 'info': None, 'size_bytes': 42949672960, 'OffsetBytes': 255002148864, 'SortedOffsetIndex': 4, 'free_bytes': 43177353216, 'used_bytes': 88985600}, {'PartitionNumber': '4', 'Type': 'Primary', 'VolumeNumber': 3, 'drive_letter': 'D', 'label': '新加卷', 'file_system': 'NTFS', 'type': 'Partition', 'size': '19', 'size_unit': 'GB', 'status': 'Healthy', 'info': None, 'size_bytes': 20401094656, 'OffsetBytes': 298268491776, 'SortedOffsetIndex': 5, 'free_bytes': 20879720448, 'used_bytes': 90746880}, {'PartitionNumber': '5', 'Type': 'Recovery', 'VolumeNumber': 5, 'drive_letter': '', 'label': None, 'file_system': 'NTFS', 'type': 'Partition', 'size': '793', 'size_unit': 'MB', 'status': 'Healthy', 'info': 'Hidden', 'size_bytes': 831520768, 'OffsetBytes': 319240011776, 'SortedOffsetIndex': 6, 'free_bytes': None, 'used_bytes': None}]}]
-    
-    all_disks_1 = [{'Disk': 'Disk 0', 'Partitions': [{'PartitionNumber': '1', 'Type': 'System', 'VolumeNumber': 0, 'drive_letter': '', 'label': None, 'file_system': 'FAT32', 'type': 'Partition', 'size': '600', 'size_unit': 'MB', 'status': 'Healthy', 'info': 'Hidden', 'size_bytes': 629145600, 'OffsetBytes': 1048576, 'SortedOffsetIndex': 1, 'free_bytes': None, 'used_bytes': None}, {'PartitionNumber': '2', 'Type': 'Unknown', 'OffsetBytes': 630194176, 'SortedOffsetIndex': 2, 'free_bytes': None, 'used_bytes': None}, {'PartitionNumber': '3', 'Type': 'Unknown', 'OffsetBytes': 1703936000, 'SortedOffsetIndex': 3, 'free_bytes': None, 'used_bytes': None}]}, {'Disk': 'Disk 1', 'Partitions': [{'PartitionNumber': '1', 'Type': 'System', 'VolumeNumber': 4, 'drive_letter': 'E', 'label': None, 'file_system': 'FAT32', 'type': 'Partition', 'size': '100', 'size_unit': 'MB', 'status': 'Healthy', 'info': 'System', 'size_bytes': 104857600, 'OffsetBytes': 1048576, 'SortedOffsetIndex': 1, 'free_bytes': 72510464, 'used_bytes': 28152832}, {'PartitionNumber': '2', 'Type': 'Reserved', 'OffsetBytes': 105906176, 'SortedOffsetIndex': 2, 'free_bytes': None, 'used_bytes': None}, {'PartitionNumber': '3', 'Type': 'Primary', 'VolumeNumber': 1, 'drive_letter': 'C', 'label': None, 'file_system': 'NTFS', 'type': 'Partition', 'size': '237', 'size_unit': 'GB', 'status': 'Healthy', 'info': 'Boot', 'size_bytes': 254476812288, 'OffsetBytes': 122683392, 'SortedOffsetIndex': 3, 'free_bytes': 189623177216, 'used_bytes': 65256263680}, {'PartitionNumber': '4', 'Type': 'Primary', 'VolumeNumber': 3, 'drive_letter': 'D', 'label': '新加卷', 'file_system': 'NTFS', 'type': 'Partition', 'size': '19', 'size_unit': 'GB', 'status': 'Healthy', 'info': None, 'size_bytes': 20401094656, 'OffsetBytes': 298268491776, 'SortedOffsetIndex': 5, 'free_bytes': 20879720448, 'used_bytes': 90746880}, {'PartitionNumber': '5', 'Type': 'Recovery', 'VolumeNumber': 5, 'drive_letter': '', 'label': None, 'file_system': 'NTFS', 'type': 'Partition', 'size': '793', 'size_unit': 'MB', 'status': 'Healthy', 'info': 'Hidden', 'size_bytes': 831520768, 'OffsetBytes': 319240011776, 'SortedOffsetIndex': 6, 'free_bytes': None, 'used_bytes': None}]}]
-    '''
-    DP = dispart_partition_volume()
+
+    DP = basic_disk_patitions()
     # 获取所有disk的分区信息
     #all_disks_data = DP.get_all_disks_partitons()
     # 仅获取系统C盘所在disk的磁盘信息
@@ -593,9 +745,9 @@ if __name__=="__main__":
     print("all_disks_data is:\n",all_disks_data)
     # 保存第一次获取磁盘信息
     # 获取当前时间
-    current_time = datetime.datetime.now()
+    current_time = datetime.now()
     #filename = f"backup_disk_details_1_{current_time.strftime('%Y%m%d_%H%M%S')}.json"
-    filename = f"disk_details_1.json"
+    filename = f"disk_details_1st.json"
     first_save_path = os.path.join(os.getcwd(),filename)
     with open(first_save_path,"w",encoding="utf-8") as f:
         json.dump(all_disks_data,f,ensure_ascii=False,indent=2)
