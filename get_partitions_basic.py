@@ -217,6 +217,7 @@ class basic_disk_patitions:
         drive_letter = if ($partition.DriveLetter) { $partition.DriveLetter } else { "" }
         size_bytes = $partition.Size 
         free_bytes = $volume.SizeRemaining
+        used_bytes = $partition.Size - $volume.SizeRemaining
         Type = $partition.Type
         OffsetBytes = $partition.Offset
         IsBoot = $partition.IsBoot

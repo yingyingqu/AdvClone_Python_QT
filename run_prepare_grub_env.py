@@ -220,7 +220,7 @@ select partition {partition_number}
 shrink desired={shrink_size_mb}
 create partition primary
 assign letter={new_drive_letter}
-format fs=ntfs label="{new_label}"quick
+format fs=ntfs label="{new_label}" quick
 exit
 """
     try:
@@ -357,6 +357,7 @@ def prepare_advclone_partition(storage_list, shrink_space_mb):
                 infomsg=f"A new advclone partition({shrink_space_mb}MB) has been created from {drive_letter}: and mounted to {free_letter}:"
                 logger.info(infomsg)
                 #print(f"从 {drive_letter}: 创建新分区 {shrink_space_mb}MB 挂载到 {free_letter}:\n", out)
+                return free_letter
                 
 def mount_EFI(all_disk_list):
     logmsg=f"[Func]run function: mount_EFI()------>>>>"
@@ -404,6 +405,7 @@ def update_grub_file(file_path, advclone_str, backup_str, before_backup_file_pat
     """
     安全的文件替换（带备份功能）
     """
+    logger.info(f"[Debug Function]update_grub_file")
     key_advclone="/dev/sda5"
     key_backup="sda1 sda2 sda3 sda4"
     try:
