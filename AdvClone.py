@@ -130,7 +130,7 @@ class BackupWizard(QMainWindow):
         step_layout.setContentsMargins(10, 20, 10, 20)
         step_layout.setSpacing(20)
         self.step_labels = []
-        for s in ["选择模式", "选择分区", "确认选择", "执行备份"]:
+        for s in ["选择模式", "备份分区", "确认选择", "执行准备"]:
             lbl = QLabel(s)
             lbl.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
             lbl.setStyleSheet("color:#777;")
@@ -836,7 +836,7 @@ class ExecutionPage(QWidget):
         card.setStyleSheet("QFrame{background:#ffffff;border-radius:12px;}")
         card_layout = QVBoxLayout(card)
 
-        title = QLabel("执行备份程序")
+        title = QLabel("执行准备程序")
         title.setFont(QFont("Microsoft YaHei",18,QFont.Bold))
         title.setStyleSheet("color:#1a73e8;")
         card_layout.addWidget(title)
