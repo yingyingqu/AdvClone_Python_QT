@@ -17,6 +17,9 @@ import time, logging
 from get_partitions_basic import basic_disk_patitions
 
 # 日志名称
+if not os.path.exists('log'):
+    os.makedirs('log')
+
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_file = f"log\\log_AdvClone_QT_{timestamp}.txt"
 
@@ -78,7 +81,7 @@ class ModeSelectPage(QWidget):
         help_title.setStyleSheet("color:#333;")
         help_text = QLabel(
             "✅ 全自动备份：系统自动检测分区与保存位置，一键执行，无需手动干预。\n"
-            "⚙️ 高级备份模式：可自行选择源分区、目标存储路径及压缩设置，适合进阶用户。"
+            "⚙️ 高级备份模式：可自行选择要备份的分区、目标存储及压缩设置。"
         )
         help_text.setFont(QFont("Microsoft YaHei", 10))
         help_text.setStyleSheet("color:#555;")
@@ -300,9 +303,12 @@ class BackupWizard(QMainWindow):
                     advclone_size_bytes = part.get("size_bytes", 0)
                     advclone_available_size_bytes = advclone_size_bytes - 730*1024*1024
 
-        
-        need_bytes = int(total_used_bytes / float(self.compress_rate))
-        shrink_space_mb = int(need_bytes / 1024 / 1024)
+        try:
+            logger.debug(f"[Debug]计算所需空间")
+            need_bytes = int(total_used_bytes / float(self.compress_rate))
+            shrink_space_mb = int(need_bytes / 1024 / 1024)
+        except Exception as e:
+            logger.error(f"{e}")
         
         logger.debug(f"\ntotal_used_bytes={total_used_bytes} bytes({self.format_size_auto(total_used_bytes)})\ncompress_rate={self.compress_rate}\nneed_bytes={need_bytes} bytes({self.format_size_auto(need_bytes)})")
 
@@ -702,7 +708,7 @@ class ConfirmSelectionPage(QWidget):
 
         # 可选存储分区
         self.partition_forbackup_items = []
-        root2 = QTreeWidgetItem(["可选存储分区"])
+        root2 = QTreeWidgetItem(["可选压缩分区/AdvClone"])
         root2.setFlags(root2.flags() & ~Qt.ItemIsSelectable)
         self.tree.addTopLevelItem(root2)
         advclone_found = False

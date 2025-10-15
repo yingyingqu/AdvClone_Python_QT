@@ -15,6 +15,8 @@ from get_partitions_basic import basic_disk_patitions
 import logging
 import sys
 # 日志名称
+if not os.path.exists('log'):
+    os.makedirs('log')
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_file = f"log\\log_run_prepare_grub_env_{timestamp}.txt"
 

@@ -14,6 +14,8 @@ import json
 import shlex
 from datetime import datetime
 # 日志名称
+if not os.path.exists('log'):
+    os.makedirs('log')
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_file = f"log\\log_get_partitions_basic_{timestamp}.txt"
 '''
