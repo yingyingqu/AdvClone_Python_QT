@@ -12,37 +12,6 @@ import locale
 
 from get_partitions_basic import basic_disk_patitions
 
-'''    
-class Logger(object):
-    def __init__(self, filename="log_run_prepare_grub_env.txt"):
-        # 尝试获取原 stdout
-        self.terminal = getattr(sys, "__stdout__", None)
-        self.log = open(filename, "a", encoding="utf-8")
-
-    def write(self, message):
-        # 写入控制台（如果有）
-        if self.terminal:
-            try:
-                self.terminal.write(message)
-            except Exception:
-                pass
-        # 写入日志文件
-        if self.log:
-            self.log.write(message)
-            self.log.flush()
-
-    def flush(self):
-        if self.terminal:
-            try:
-                self.terminal.flush()
-            except Exception:
-                pass
-        if self.log:
-            self.log.flush()
-log_path = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__), "log_run_prepare_grub_env.txt")
-sys.stdout = Logger(log_path)
-sys.stderr = sys.stdout
-'''
 import logging
 import sys
 # 日志名称
@@ -58,14 +27,14 @@ file_handler = logging.FileHandler(log_file, encoding="utf-8")
 file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 file_handler.setFormatter(file_formatter)
 logger.addHandler(file_handler)
-
+'''
 # 2️⃣ 控制台输出（只输出部分信息）
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)  # 只显示 INFO 及以上
 console_formatter = logging.Formatter("[%(levelname)s] %(message)s")
 console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
-
+'''
 
 # 3️⃣ 替换 print，使 print 也输出到 logger（可选）
 class PrintLogger:
@@ -130,8 +99,57 @@ def run_powershell(cmd: str) -> str:
             return f.read()
     finally:
         os.remove(output_file_path)
+
+
+
 def runCmd(cmd: str, timeout: int = 60) -> str:
-    """执行命令，不弹出窗口，兼容中文系统输出"""
+    """
+    执行命令，不弹出窗口，强制英文输出，兼容中文系统。
+    支持 Windows 系统命令英文输出。
+    """
+    logger.debug(f"---[runCmd]{cmd}----")
+    env = os.environ.copy()
+
+    # 强制英文输出
+    env["LANG"] = "en_US.UTF-8"
+    env["LC_ALL"] = "en_US.UTF-8"
+
+    # 设置编码为 utf-8
+    encoding = "utf-8"
+
+    # Windows cmd 隐藏窗口
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    # 在 Windows 上强制英文，使用 chcp 65001 临时切换为 UTF-8
+    if os.name == "nt":
+        cmd = f'chcp 65001>nul & {cmd}'
+
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            text=True,
+            encoding=encoding,
+            errors="replace",
+            env=env,
+            startupinfo=startupinfo
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        logger.error(f"[ERROR] command: {cmd}\noutput:\n{e.stdout}")
+        raise
+    except subprocess.TimeoutExpired:
+        logger.warning(f"[TIMEOUT] command timeout: {cmd}")
+        raise
+
+
+def runCmd_x(cmd: str, timeout: int = 60) -> str:
+    """执行命令，不弹出窗口，兼容中文系统输出，中文系统输出含中文，不适合匹配"""
     env = os.environ.copy()
     
     startupinfo = subprocess.STARTUPINFO()
@@ -308,6 +326,9 @@ def load_json_data(json_file):
         all_datas = json.load(f)
         return all_datas
 def save_json_data(json_data, save_path):
+    # 写入前先清空文件
+    with open(save_path, "w", encoding="utf-8") as f:
+        f.write("")  # 先清空文件内容
     with open(save_path,"w",encoding="utf-8") as f:
         json.dump(json_data,f,ensure_ascii=False,indent=2)
         
@@ -315,7 +336,9 @@ def prepare_advclone_partition(storage_list, shrink_space_mb):
     logmsg=f"[Func]prepare_advclone_partition: storage_list={storage_list},shrink_space_mb={shrink_space_mb}----->>>>>>"
     #print(logmsg)
     logger.debug(logmsg)
+
     for part in storage_list:
+
         label = (part.get("label") or "").lower()
         disk_num = part.get("DiskNumber")
         partition_num = part.get("PartitionNumber")
@@ -405,7 +428,7 @@ def update_grub_file(file_path, advclone_str, backup_str, before_backup_file_pat
     """
     安全的文件替换（带备份功能）
     """
-    logger.info(f"[Debug Function]update_grub_file")
+    #logger.info(f"[Debug Function]update_grub_file")
     key_advclone="/dev/sda5"
     key_backup="sda1 sda2 sda3 sda4"
     try:
@@ -449,7 +472,7 @@ def update_grub_file(file_path, advclone_str, backup_str, before_backup_file_pat
             f.write(new_content)
         
         infomsg=f"Complete to update grub.cfg\nSource:'{key_advclone}' New:'{advclone_str}'\nSource:'{key_backup}', New:'{backup_str}'"
-        logger.info(infomsg)
+        logger.debug(infomsg)
         #print("替换完成！")
         #print(f"原'{key_advclone}'替换为: '{advclone_str}'")
         #print(f"原'{key_backup}'替换为: '{backup_str}'")
@@ -488,19 +511,26 @@ def clean_advclone_entries():
     #print('---清理AdvClone启动项...')
     try:
         # 获取启动项列表
+        '''
         result = subprocess.run('bcdedit /enum BOOTMGR', 
                               capture_output=True, text=True, shell=True, timeout=300)
         
         if result.returncode != 0:
             return False
         #print(result.stdout)
-        logger.info(result.stdout)
+        logger.debug(result.stdout)
         # 查找所有AdvClone条目的GUID
         pattern = r'identifier\s+{([^}]+)}[^}]*?description\s+.*AdvClone'
         guids = re.findall(pattern, result.stdout, re.DOTALL | re.IGNORECASE)
-        
+        '''
+        output = runCmd('bcdedit /enum BOOTMGR')
+        logger.debug(output)
+        pattern = r'identifier\s+{([^}]+)}[^}]*?description\s+.*AdvClone'
+        guids = re.findall(pattern, output, re.DOTALL | re.IGNORECASE)
+        #logger.info(f"guids={guids}")
         # 删除找到的条目
         for guid in set(guids):  # 去重
+            logger.debug(f"guid: {guid}")
             subprocess.run(f'bcdedit /delete {{{guid}}} /f', 
                          shell=True, timeout=60)
             #print(f'已删除: {guid}')
@@ -527,7 +557,7 @@ def modify_boot_order(EFImountLTR: str):
     logger.info(infomsg)
     #print("[STEP1] 复制 bootmgr 启动项")    
     output = runCmd('bcdedit /copy {bootmgr} /d "AdvClone"')
-    logger.info(output)
+    #logger.info(output)
 
     # 用正则提取 {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
     match = re.search(r"\{[0-9a-fA-F\-]{36}\}", output)
@@ -536,7 +566,7 @@ def modify_boot_order(EFImountLTR: str):
 
     ID = match.group(0).strip("{}")
     infomsg=f"[INFO] New boot item GUID: {ID}"
-    logger.info(output)
+    logger.info(infomsg)
     #print(f"[INFO] 新启动项 GUID: {ID}")
 
     # step2: 设置分区
@@ -692,7 +722,7 @@ if __name__=="__main__":
         grub_config_file=os.path.join(os.getcwd(),r"boot\grub\grub.cfg")
         #print(grub_config_file)
         infomsg=f"{grub_config_file}"
-        logger.info(infomsg)
+        logger.debug(infomsg)
 
         # grub备份文件名字
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

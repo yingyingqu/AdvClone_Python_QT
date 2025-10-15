@@ -283,10 +283,10 @@ class basic_disk_patitions:
                 data = json.loads(data_json)
                 for d in data:
                     logmsg=f"{d},type(d.get('DiskIndex'))={type(d.get('DiskIndex'))}, type(disk_id)={type(disk_id)}, d.get('Type')={d.get('Type')}"
-                    print(logmsg)
+                    #print(logmsg)
                     logger.debug(logmsg)
                     if str(d.get('DiskIndex'))==str(disk_id) and d.get('Type')=='GPT: System':
-                        print(f"[Debug]返回结果：{d.get('DriveLetter')}")
+                        #print(f"[Debug]返回结果：{d.get('DriveLetter')}")
                         if d.get('DriveLetter') != None:
                             return d.get('DriveLetter').replace(":", "")
                         else:

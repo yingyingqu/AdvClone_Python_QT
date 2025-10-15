@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QSettings, QThread, pyqtSignal, QProcess
 from PyQt5.QtGui import  QFont, QIntValidator
-
+import ctypes
 
 import time, logging
 
@@ -18,39 +18,8 @@ from get_partitions_basic import basic_disk_patitions
 
 # 日志名称
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_file = f"log\\log_QT_{timestamp}.txt"
-# ===================== 日志处理 =====================
-'''
-class Logger(object):
-    def __init__(self, filename=log_file):
-        # 尝试获取原 stdout
-        self.terminal = getattr(sys, "__stdout__", None)
-        self.log = open(filename, "a", encoding="utf-8")
+log_file = f"log\\log_AdvClone_QT_{timestamp}.txt"
 
-    def write(self, message):
-        # 写入控制台（如果有）
-        if self.terminal:
-            try:
-                self.terminal.write(message)
-            except Exception:
-                pass
-        # 写入日志文件
-        if self.log:
-            self.log.write(message)
-            self.log.flush()
-
-    def flush(self):
-        if self.terminal:
-            try:
-                self.terminal.flush()
-            except Exception:
-                pass
-        if self.log:
-            self.log.flush()
-log_path = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__), log_file)
-sys.stdout = Logger(log_path)
-sys.stderr = sys.stdout
-'''
 # 自定义 Logger
 logger = logging.getLogger("MyLogger")
 logger.setLevel(logging.DEBUG)  # 捕获所有级别
@@ -76,9 +45,6 @@ class PrintLogger:
             logger.info(message.strip())
     def flush(self):
         pass
-
-
-
 
 
 # ---------------- ModeSelectPage ----------------
@@ -147,6 +113,261 @@ class ModeSelectPage(QWidget):
         layout.addStretch()
 
 
+# ---------------- BackupWizard ----------------
+class BackupWizard(QMainWindow):
+    def __init__(self, all_disks):
+        super().__init__()
+        self.setWindowTitle("AdvClone 备份向导")
+        self.resize(1000, 600)
+
+        splitter = QSplitter()
+        splitter.setHandleWidth(1)
+        self.setCentralWidget(splitter)
+
+        # 左侧步骤栏
+        self.step_widget = QWidget()
+        step_layout = QVBoxLayout(self.step_widget)
+        step_layout.setContentsMargins(10, 20, 10, 20)
+        step_layout.setSpacing(20)
+        self.step_labels = []
+        for s in ["选择模式", "选择分区", "确认选择", "执行备份"]:
+            lbl = QLabel(s)
+            lbl.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
+            lbl.setStyleSheet("color:#777;")
+            self.step_labels.append(lbl)
+            step_layout.addWidget(lbl)
+        step_layout.addStretch()
+        splitter.addWidget(self.step_widget)
+
+        # 右侧堆栈页面
+        self.stack = QStackedWidget()
+        splitter.addWidget(self.stack)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 5)
+
+        # 参数
+        self.all_disks = all_disks
+        self.compress_rate = self.getConfigValue('COMPRESSRATE', 'rate')
+
+        
+        # --- 页面初始化 ---
+        self.page0 = ModeSelectPage(self.go_to_auto, self.go_to_advanced)
+        self.stack.addWidget(self.page0)
+        self.stack.setCurrentWidget(self.page0)
+        self.update_steps(0)
+        self.update_step_visibility(mode_select=True)  # ✅ 只显示“选择模式”
+
+        self.page1 = None
+        self.page2 = None
+        self.page3 = None
+
+
+    # ---------------- 辅助函数 ----------------
+    def update_steps(self, index):
+        for i, lbl in enumerate(self.step_labels):
+            lbl.setStyleSheet("color:#1a73e8;" if i == index else "color:#444;")
+
+    def update_step_visibility(self, mode_select=False):
+        """控制左侧步骤栏显示"""
+        if mode_select:
+            # 模式选择页：仅显示第一个步骤
+            for i, lbl in enumerate(self.step_labels):
+                lbl.setVisible(i == 0)
+        else:
+            # 高级模式：显示全部步骤
+            for lbl in self.step_labels:
+                lbl.setVisible(True)
+
+
+    def getConfigValue(self, section, key, default_value=None):
+        """通用的配置读取方法"""
+        settings = QSettings('config.ini', QSettings.IniFormat)
+        
+        # 构建完整的键路径
+        full_key = f'{section}/{key}'
+        return settings.value(full_key, default_value)
+
+    # ---------------- 页面切换 ----------------
+
+    def go_to_auto(self):
+        """自动模式：直接进入执行页"""
+        self.step_widget.hide()  # ✅ 隐藏左侧步骤栏
+
+        selected_backup, selected_storage, shrink_space_mb = self.auto_select_partitions()
+
+        if not self.page3:
+            self.page3 = ExecutionPage(self.go_to_mode_select)
+            self.stack.addWidget(self.page3)
+
+        self.page3.load_data(selected_backup, selected_storage, shrink_space_mb, "selected_partitions.json")
+        self.page3.set_auto_mode(True)
+        self.stack.setCurrentWidget(self.page3)
+        self.page3.start_exec()
+
+    def go_to_advanced(self):
+        """高级模式：进入分区选择页"""
+        self.step_widget.show()
+        self.update_step_visibility(mode_select=False)
+        self.update_steps(1)
+
+        if not self.page1:
+            self.page1 = PartitionSelectorPage(self.all_disks, self.go_to_confirm, self.compress_rate, back_callback=self.go_to_mode_select)
+            self.stack.addWidget(self.page1)
+        if not self.page2:
+            self.page2 = ConfirmSelectionPage(self.go_to_select, self.go_to_exec, self.all_disks, self.compress_rate)
+            self.stack.addWidget(self.page2)
+        if not self.page3:
+            self.page3 = ExecutionPage(self.go_to_confirm_back)
+            self.stack.addWidget(self.page3)
+
+        self.stack.setCurrentWidget(self.page1)
+
+
+
+    # ---------------- 页面回调 ----------------
+    def go_to_mode_select(self):
+        """返回模式选择页"""
+        self.step_widget.show()
+        self.stack.setCurrentWidget(self.page0)
+        self.update_steps(0)
+        self.update_step_visibility(mode_select=True)
+
+    def go_to_confirm(self, selected_first_page):
+        self.page2.load_data(selected_first_page)
+        self.stack.setCurrentWidget(self.page2)
+        self.update_steps(2)
+
+    def go_to_exec(self, selected_first_page, selected_storage, shrink_space_mb):
+        if not self.page3:
+            self.page3 = ExecutionPage(self.go_to_confirm_back)
+            self.stack.addWidget(self.page3)
+        
+        save_path = os.path.join(os.getcwd(), "selected_partitions.json")   
+        # 标记模式，方便执行页识别
+        mode_data = {
+            "auto_mode": False,
+            "backup": selected_first_page,
+            "storage": selected_storage,
+            "shrink_space_mb": shrink_space_mb
+        }
+        # 写入前先清空文件
+        with open(save_path, "w", encoding="utf-8") as f:
+            f.write("")  # 先清空文件内容
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump(mode_data, f, ensure_ascii=False, indent=2)
+
+        self.page3.load_data(selected_first_page, selected_storage, shrink_space_mb, "selected_partitions.json")
+        self.stack.setCurrentWidget(self.page3)
+        self.update_steps(3)
+
+    def go_to_select(self):
+        self.stack.setCurrentWidget(self.page1)
+        self.update_steps(1)
+
+    def go_to_confirm_back(self):
+        self.stack.setCurrentWidget(self.page2)
+        self.update_steps(2)
+
+    # ---------------- 自动模式分区选择逻辑 ----------------
+    def format_size_auto(self, size_bytes):
+        if size_bytes <= 0:
+            return ""
+        units = [(1024**3, "GB"), (1024**2,"MB"),(1024,"KB"),(1,"B")]
+        for threshold, unit in units:
+            if size_bytes >= threshold:
+                size = size_bytes / threshold
+                return f"{size:.2f} {unit}"
+        return f"{size_bytes} B"
+    def auto_select_partitions(self):
+        """返回 (selected_backup, selected_storage, shrink_space_mb)"""
+        selected_backup = []
+        selected_storage = []
+        total_used_bytes = 0
+        advclone_found = False
+        
+        logger.debug("Find advclone and caculate total_used_bytes")
+        for d in self.all_disks:
+            disk = self.all_disks[d]
+            for part in disk["Partitions"]:
+                logger.debug(f"{part}\npart.get('label')={part.get('label')}")
+                if (part.get('label') or "").lower() != "advclone":
+                    selected_backup.append(part)
+                    total_used_bytes += part.get("used_bytes", part.get("size_bytes", 0))
+                    logger.debug(f"Not advclone: selected_backup={selected_backup}\ntotal_used_bytes={total_used_bytes}\n")
+                else:
+                    advclone_found = True
+                    advclone_part = part
+                    advclone_size_bytes = part.get("size_bytes", 0)
+                    advclone_available_size_bytes = advclone_size_bytes - 730*1024*1024
+
+        
+        need_bytes = int(total_used_bytes / float(self.compress_rate))
+        shrink_space_mb = int(need_bytes / 1024 / 1024)
+        
+        logger.debug(f"\ntotal_used_bytes={total_used_bytes} bytes({self.format_size_auto(total_used_bytes)})\ncompress_rate={self.compress_rate}\nneed_bytes={need_bytes} bytes({self.format_size_auto(need_bytes)})")
+
+        if advclone_found:
+            if advclone_available_size_bytes >= need_bytes:
+                logger.debug("\n-->advclone already exist and size is ok.")
+                logger.debug(f"advclone_available_size_bytes={advclone_available_size_bytes}bytes({self.format_size_auto(advclone_available_size_bytes)})")
+                selected_storage = [advclone_part]
+            else:
+                mesg = f"""advclone 分区空间不足。
+    advclone分区可用空间大小: {advclone_available_size_bytes} bytes({self.format_size_auto(advclone_available_size_bytes)})
+    所需空间: {need_bytes} bytes({self.format_size_auto(need_bytes)})
+    请退出本程序，在设备管理中删除后重新执行。"""
+                #QMessageBox.warning(self,"提示",mesg)
+                logger.debug(mesg)
+                # 询问用户是否继续
+                reply = QMessageBox.question(
+                    self, 
+                    "Warning", 
+                    f"{mesg}\n\n点击 Yes 退出程序，点击 No 继续使用。",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                
+                if reply == QMessageBox.Yes:
+                    QApplication.quit()  # 只有用户确认时才退出
+                else:
+                    self.reset_buttons()
+        elif not advclone_found:
+            logger.debug("advclone not exist.")
+            # 自动选择一个可用分区作为 storage
+            for d in self.all_disks:
+                disk = self.all_disks[d]
+                for part in disk["Partitions"]:
+                    logger.debug(f"{part}\npart.get('free_bytes')={part.get('free_bytes')}, need_bytes={need_bytes}")
+                    if part.get('free_bytes') and part.get('free_bytes') >= need_bytes:
+                        logger.debug(f"!!Find the selected_storage!!")
+                        selected_storage = [part]
+                        break
+                if selected_storage:
+                    break
+        
+        save_path = os.path.join(os.getcwd(), "selected_partitions.json")
+
+        # 标记全自动模式，方便执行页识别
+        mode_data = {
+            "auto_mode": True,
+            "backup": selected_backup,
+            "storage": selected_storage,
+            "shrink_space_mb": shrink_space_mb
+        }
+        # 写入前先清空文件
+        with open(save_path, "w", encoding="utf-8") as f:
+            f.write("")  # 先清空文件内容
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump(mode_data, f, ensure_ascii=False, indent=2)
+
+        logger.debug(f"\nAutoMode:\nselected_backup={selected_backup}\nselected_storage={selected_storage}\nshrink_space_mb={shrink_space_mb}")
+        return selected_backup, selected_storage, shrink_space_mb
+
+
+
+
+
+
 # ---------------- 修改 PartitionSelectorPage ----------------
 class PartitionSelectorPage(QWidget):
     def __init__(self, all_disks, next_callback, compress_rate, back_callback=None):
@@ -199,8 +420,8 @@ class PartitionSelectorPage(QWidget):
                 label = str(part.get("label","") or "")
                 part_info = f"{part.get('Type','')} ({part.get('drive_letter','')}:)" if part.get('drive_letter') else part.get('Type','')
                 #size = f"{part.get('size','')} {part.get('size_unit','')}"
-                size = f"{self.format_size_auto(part.get('used_bytes', 0))}"
-                free = f"{part.get('free_bytes',0)/1024**3:.2f} GB" if part.get('free_bytes') else ""
+                size = f"{self.format_size_auto(part.get('size_bytes', 0))}"
+                free = f"{self.format_size_auto(part.get('free_bytes'))}" if part.get('free_bytes') else ""
                 item = QTreeWidgetItem([part_info,label,part.get('FileSystem',''),size,free,str(part.get("info",""))])
                 item.setData(0, Qt.UserRole, part)  # 绑定分区数据
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
@@ -213,33 +434,66 @@ class PartitionSelectorPage(QWidget):
                 self.partition_items.append(part)
         self.tree.expandAll()
 
+        
         # 下方按钮布局
         btn_layout = QHBoxLayout()
-        if self.back_callback:
-            btn_back = QPushButton("上一步")
-            btn_back.setMinimumHeight(36)
-            btn_back.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-            btn_back.setStyleSheet(
-                "QPushButton { background-color:#1a73e8;color:white;border-radius:8px;padding:6px 18px; }"
-                "QPushButton:hover { background-color:#1669c1; }"
-                "QPushButton:pressed { background-color:#0d47a1; }"
-            )
-            btn_back.clicked.connect(self.back_callback)
-            btn_layout.addWidget(btn_back)
-        btn_next = QPushButton("下一步")
-        btn_next.setMinimumHeight(36)
-        btn_next.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        btn_next.setStyleSheet(
-            "QPushButton { background-color:#1a73e8;color:white;border-radius:8px;padding:6px 18px; }"
-            "QPushButton:hover { background-color:#1669c1; }"
-            "QPushButton:pressed { background-color:#0d47a1; }"
-        )
-        btn_next.clicked.connect(self.go_next)
-        btn_layout.addWidget(btn_next)
-        btn_layout.addStretch()
+        self.btn_back = QPushButton("上一步")
+        self.btn_next = QPushButton("下一步")
+        
+        self.set_buttons_enabled(True)
+        
+
+        self.btn_back.clicked.connect(self.back_callback)
+        self.btn_next.clicked.connect(self.go_next)
+        btn_layout.addWidget(self.btn_back)        
+        btn_layout.addWidget(self.btn_next)
+        #btn_layout.addStretch()#把addStretch() 放在了按钮之后，这会把按钮推到左侧
         card_layout.addLayout(btn_layout)
 
         layout.addWidget(card)
+        
+    def set_buttons_enabled(self, enabled):
+        """统一设置按钮状态，禁用时变为灰色"""
+        self.btn_next.setEnabled(enabled)
+        self.btn_back.setEnabled(enabled)
+        
+        if enabled:
+            # 正常样式 - 启用状态
+            normal_style = """
+                QPushButton {
+                    background-color: #1a73e8;
+                    color: white;
+                    border-radius: 8px;
+                    padding: 6px 18px;
+                    border: none;
+                }
+                QPushButton:hover {
+                    background-color: #1669c1;
+                }
+                QPushButton:pressed {
+                    background-color: #0d47a1;
+                }
+            """
+            self.btn_next.setStyleSheet(normal_style)
+            self.btn_back.setStyleSheet(normal_style)
+            
+            
+        else:
+            # 禁用样式 - 灰色
+            disabled_style = """
+                QPushButton {
+                    background-color: #cccccc;
+                    color: #666666;
+                    border-radius: 8px;
+                    padding: 6px 18px;
+                    border: 1px solid #aaaaaa;
+                }
+            """
+            self.btn_next.setStyleSheet(disabled_style)
+            self.btn_back.setStyleSheet(disabled_style)
+        
+        # 强制UI更新
+        QApplication.processEvents()
         
     def format_size_auto(self, size_bytes):
         if size_bytes <= 0:
@@ -280,9 +534,9 @@ class PartitionSelectorPage(QWidget):
                         if advclone_available_size_bytes < need_bytes:
                             drive = part.get("drive_letter","")
                             mesg = f"""advclone 分区 ({drive}) 空间不足。
-    已选分区总大小: {total_used_bytes} bytes
-    所需空间: {need_bytes} bytes
-    advclone 分区可用: {advclone_available_size_bytes} bytes"""
+    已选要备份的分区总大小: {total_used_bytes} bytes ({self.format_size_auto(total_used_bytes)})
+    所需空间: {need_bytes} bytes({self.format_size_auto(need_bytes)})
+    advclone分区可用空间: {advclone_available_size_bytes} bytes({self.format_size_auto(advclone_available_size_bytes)})"""
                             QMessageBox.warning(self,"提示",mesg)
                             return
             # 正常跳转第二页，并传递已选分区
@@ -295,192 +549,6 @@ class PartitionSelectorPage(QWidget):
             return
 
 
-
-# ---------------- BackupWizard ----------------
-class BackupWizard(QMainWindow):
-    def __init__(self, all_disks):
-        super().__init__()
-        self.setWindowTitle("AdvClone 备份向导")
-        self.resize(1000, 600)
-
-        splitter = QSplitter()
-        splitter.setHandleWidth(1)
-        self.setCentralWidget(splitter)
-
-        # 左侧步骤栏
-        self.step_widget = QWidget()
-        step_layout = QVBoxLayout(self.step_widget)
-        step_layout.setContentsMargins(10, 20, 10, 20)
-        step_layout.setSpacing(20)
-        self.step_labels = []
-        for s in ["一、选择模式", "二、选择分区", "三、确认选择", "四、执行备份"]:
-            lbl = QLabel(s)
-            lbl.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
-            lbl.setStyleSheet("color:#777;")
-            self.step_labels.append(lbl)
-            step_layout.addWidget(lbl)
-        step_layout.addStretch()
-        splitter.addWidget(self.step_widget)
-
-        # 右侧堆栈页面
-        self.stack = QStackedWidget()
-        splitter.addWidget(self.stack)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 5)
-
-        # 参数
-        self.all_disks = all_disks
-        self.compress_rate = self.getConfigValue('COMPRESSRATE', 'rate')
-
-        # 页面实例化
-        self.page0 = ModeSelectPage(self.go_to_auto, self.go_to_advanced)
-        self.page1 = PartitionSelectorPage(all_disks, self.go_to_confirm, self.compress_rate, back_callback=self.go_to_mode_select)
-        self.page2 = ConfirmSelectionPage(self.go_to_select, self.go_to_exec, all_disks, self.compress_rate)
-        self.page3 = ExecutionPage(self.go_to_confirm_back)
-
-        self.stack.addWidget(self.page0)
-        self.stack.addWidget(self.page1)
-        self.stack.addWidget(self.page2)
-        self.stack.addWidget(self.page3)
-
-        self.update_steps(0)
-
-    # ---------------- 辅助函数 ----------------
-    def update_steps(self, index):
-        for i, lbl in enumerate(self.step_labels):
-            lbl.setStyleSheet("color:#1a73e8;" if i == index else "color:#777;")
-
-    def getConfigValue(self, section, key):
-        return 5  # 占位
-
-    # ---------------- 页面切换 ----------------
-    def go_to_mode_select(self):
-        """返回模式选择页"""
-        for lbl in self.step_labels:
-            lbl.show()
-        self.stack.setCurrentWidget(self.page0)
-        self.update_steps(0)
-
-    def go_to_advanced(self):
-        """进入高级模式"""
-        for lbl in self.step_labels:
-            lbl.show()
-        self.stack.setCurrentWidget(self.page1)
-        self.update_steps(1)
-
-    def go_to_auto(self):
-        """进入全自动模式"""
-        # 隐藏中间步骤
-        logger.debug(f"[Debug]BackupWizard->go_to_auto")
-        self.step_labels[1].hide()
-        self.step_labels[2].hide()
-        self.update_steps(3)
-        advclone_found = False
-        advclone_size_ok = False
-        # ---------------- 自动模式参数 ----------------
-        selected_backup = []     # 磁盘全部分区
-        selected_storage = []    # 可留空或从 DP 自动选择
-        total_used_bytes=0
-        shrink_space_mb = 2048   # 默认压缩空间大小
-        #计算总大小,
-        #并找到合适的advclone分区，如果有判断大小是否OK，如果没有则自动选择目标分区
-        try:
-            for d in self.all_disks:
-                disk=self.all_disks.get(d)
-                for part in disk["Partitions"]:
-                    logger.debug(f"[Debug]{part.get('label', '')}")
-                    logger.debug(part.get("label", ""))
-                    if part.get("label", "").lower() != "advclone":
-                        selected_backup.append(part)
-                        if part.get("used_bytes"):
-                            total_used_bytes = total_used_bytes + part.get("used_bytes")
-                        else:
-                            total_used_bytes = total_used_bytes + part.get("size_bytes",0)
-                    else:
-                        logger.debug(f"[Debug]Find advclone")
-                        advclone_found = True
-                        advclone_size_bytes = part.get("size_bytes",0)
-                        advclone_available_size_bytes = advclone_size_bytes - 730*1024*1024 #可用有效空间，去掉advclone自身系统占用空间
-                        logger.debug(f"[Debug]advclone_size_bytes={advclone_size_bytes}, advclone_available_size_bytes={advclone_available_size_bytes}")
-            need_bytes = int(total_used_bytes + 730*1024*1024 / float(self.compress_rate)) #所需空间补上advclone自身系统占用空间
-            logger.debug(f"[Debug]total_used_bytes={total_used_bytes}")
-            logger.debug(f"[Debug]need_bytes={need_bytes}")
-            shrink_space_mb = int(need_bytes/1024/1024)
-            if advclone_found == True:
-                if advclone_available_size_bytes < need_bytes:
-                    drive = part.get("drive_letter","")
-                    mesg = f"""  已有 advclone 分区 ({drive}) 空间不足\n  被选分区已用空间总大小{total_used_bytes} bytes\n  我们需要{need_bytes} bytes\n  但是advclone只用{advclone_size_bytes} bytes\n  请删除或扩展该分区后重新创建。"""
-                    QMessageBox.warning(self,"提示",mesg)
-                    logger.debug(mesg)
-                    return
-                else:
-                    selected_storage=[part]
-            else:
-                logger.debug(f"Find the selected_storage to shrink advclone...")
-                for d in self.all_disks:
-                    disk=self.all_disks.get(d)
-                    for part in disk["Partitions"]:
-                        part_free_size=part.get('free_bytes', 0)
-                        logger.debug(f"{part}, part_free_size={part_free_size}, drive_letter={part.get('drive_letter')}")
-                        if part_free_size and part_free_size > need_bytes and part.get('drive_letter')!='':
-                            logger.debug("Find it!")
-                            selected_storage = [part]
-                            mesg = f"""We will shrink {need_bytes}bytes from {part.get('drive_letter')} as advclone partition to store backup files"""
-                            logger.debug(f"[Debug]{mesg}")
-                            break
-        except Exception as e:
-            raise
-            
-                  
-        save_path = os.path.join(os.getcwd(), "selected_partitions.json")
-
-        # 标记全自动模式，方便执行页识别
-        auto_mode_data = {
-            "auto_mode": True,
-            "backup": selected_backup,
-            "storage": selected_storage,
-            "shrink_space_mb": shrink_space_mb
-        }
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(auto_mode_data, f, ensure_ascii=False, indent=2)
-
-        # ---------------- 加载到执行页 ----------------
-        self.page3.load_data(selected_backup, selected_storage, shrink_space_mb, save_path)
-        self.page3.set_auto_mode(True)  # 可在 ExecutionPage 新增此方法
-        self.stack.setCurrentWidget(self.page3)
-
-        # 可直接启动执行逻辑（如果希望自动运行）
-        # self.page3.start_exec()
-
-
-    def go_to_confirm(self, selected_first_page):
-        """跳转确认选择页"""
-        self.page2.load_data(selected_first_page)
-        self.stack.setCurrentWidget(self.page2)
-        self.update_steps(2)
-
-    def go_to_exec(self, selected_first_page, selected_storage, shrink_space_mb):
-        current_time = datetime.now()
-        #filename = f"backup_selected_partitions_{current_time.strftime('%Y%m%d_%H%M%S')}.json"
-        filename = f"selected_partitions.json"
-        self.save_path = os.path.join(os.getcwd(),filename)
-        self.shrink_space_mb = shrink_space_mb
-        with open(self.save_path,"w",encoding="utf-8") as f:
-            logger.debug(f"selected_first_page: {selected_first_page}")
-            logger.debug(f"selected_storage: {selected_storage}")
-            logger.debug(f"shrink_space_mb: {shrink_space_mb}")
-            json.dump({"backup": selected_first_page, "storage": selected_storage, "shrink_space_mb": self.shrink_space_mb},f,ensure_ascii=False,indent=2)
-        self.page3.load_data(selected_first_page, selected_storage, self.shrink_space_mb, self.save_path)
-        self.stack.setCurrentWidget(self.page3)
-        self.update_steps(2)
-
-    def go_to_select(self):
-        self.stack.setCurrentWidget(self.page1)
-        self.update_steps(1)
-
-    def go_to_confirm_back(self):
-        self.stack.setCurrentWidget(self.page2)
-        self.update_steps(2)
 
 
         
@@ -535,19 +603,61 @@ class ConfirmSelectionPage(QWidget):
         card_layout.addLayout(size_layout)
 
         btn_layout = QHBoxLayout()
-        btn_back = QPushButton("上一步")
-        btn_next = QPushButton("下一步")
-        for btn in [btn_back, btn_next]:
-            btn.setMinimumHeight(36)
-            btn.setFont(QFont("Microsoft YaHei",10,QFont.Bold))
-            btn.setStyleSheet("QPushButton {background-color:#1a73e8;color:white;border-radius:8px;padding:6px 18px;} QPushButton:hover {background-color:#1669c1;} QPushButton:pressed {background-color:#0d47a1;}")
-        btn_back.clicked.connect(self.back_callback)
-        btn_next.clicked.connect(self.go_next)
-        btn_layout.addWidget(btn_back)
-        btn_layout.addWidget(btn_next)
+        self.btn_back = QPushButton("上一步")
+        self.btn_next = QPushButton("下一步")
+
+        self.set_buttons_enabled(True)
+        
+        self.btn_back.clicked.connect(self.back_callback)
+        self.btn_next.clicked.connect(self.go_next)
+        btn_layout.addWidget(self.btn_back)
+        btn_layout.addWidget(self.btn_next)
         card_layout.addLayout(btn_layout)
 
         layout.addWidget(card)
+        
+    def set_buttons_enabled(self, enabled):
+        """统一设置按钮状态，禁用时变为灰色"""
+        self.btn_next.setEnabled(enabled)
+        self.btn_back.setEnabled(enabled)
+        
+        if enabled:
+            # 正常样式 - 启用状态
+            normal_style = """
+                QPushButton {
+                    background-color: #1a73e8;
+                    color: white;
+                    border-radius: 8px;
+                    padding: 6px 18px;
+                    border: none;
+                }
+                QPushButton:hover {
+                    background-color: #1669c1;
+                }
+                QPushButton:pressed {
+                    background-color: #0d47a1;
+                }
+            """
+            self.btn_next.setStyleSheet(normal_style)
+            self.btn_back.setStyleSheet(normal_style)
+            
+            
+        else:
+            # 禁用样式 - 灰色
+            disabled_style = """
+                QPushButton {
+                    background-color: #cccccc;
+                    color: #666666;
+                    border-radius: 8px;
+                    padding: 6px 18px;
+                    border: 1px solid #aaaaaa;
+                }
+            """
+            self.btn_next.setStyleSheet(disabled_style)
+            self.btn_back.setStyleSheet(disabled_style)
+        
+        # 强制UI更新
+        QApplication.processEvents()
 
     def format_size_auto(self, size_bytes):
         if size_bytes <= 0:
@@ -562,10 +672,11 @@ class ConfirmSelectionPage(QWidget):
     def load_data(self, selected_first_page):
         logger.debug(f"======[Debug]page2: load_data======")
         self.selected_first_page = selected_first_page
+        logger.debug(f"self.selected_first_page={self.selected_first_page}")
         total_used_bytes = sum(p.get("used_bytes",0) or p.get("size_bytes",0) for p in selected_first_page)
         need_bytes = int(total_used_bytes / float(self.compress_rate))
         self.need_bytes = need_bytes
-        logger.debug(f"[Debug]total_used_bytes={total_used_bytes},need_bytes={need_bytes},self.need_bytes={self.need_bytes}")
+        logger.debug(f"[Debug]total_used_bytes={total_used_bytes},need_bytes={need_bytes},self.compress_rate={self.compress_rate}")
         self.info_label.setText(f"已选择 {len(selected_first_page)} 个分区\n原始总大小: {self.format_size_auto(total_used_bytes)}\n预计需要空间: {self.format_size_auto(need_bytes)}\n(压缩率: {self.compress_rate})")
         input_default_bytes = self.need_bytes + 750*1024*1024
         input_default_mb = float(input_default_bytes/1024/1024)
@@ -583,8 +694,8 @@ class ConfirmSelectionPage(QWidget):
             info = f"{part.get('Type','')} ({part.get('drive_letter','')}:)" if part.get('drive_letter') else part.get('Type','')
             item = QTreeWidgetItem([info,
                                      f"{self.format_size_auto(part.get('size_bytes', 0))}",
-                                     f"{part.get('used_bytes',0)/1024**3:.2f} GB" if part.get('used_bytes') else "",
-                                     f"{part.get('free_bytes',0)/1024**3:.2f} GB" if part.get('free_bytes') else "",
+                                     f"{self.format_size_auto(part.get('used_bytes'))}" if part.get('used_bytes') else "",
+                                     f"{self.format_size_auto(part.get('free_bytes'))}" if part.get('free_bytes') else "",
                                      str(part.get("info",""))])
             item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
             root1.addChild(item)
@@ -679,20 +790,7 @@ class ConfirmSelectionPage(QWidget):
                             self.selected_storage.append(part)
 
             logger.debug(f"self.selected_storage:{self.selected_storage}")
-            '''
-            if not self.selected_storage:
-                # 自动选择第一个可用分区，防止异常退出
-                for d in range(storage_root.childCount()):
-                    disk_item = storage_root.child(d)
-                    for p in range(disk_item.childCount()):
-                        item = disk_item.child(p)
-                        part = item.data(0, Qt.UserRole)
-                        if part:
-                            self.selected_storage.append(part)
-                            break
-                    if self.selected_storage:
-                        break
-            '''
+
             if not self.selected_storage:
                 QMessageBox.warning(self,"提示","未找到可用的存储分区！")
                 return
@@ -710,7 +808,7 @@ class ConfirmSelectionPage(QWidget):
 
             # 调用外部回调
             if hasattr(self, 'next_callback') and self.next_callback:
-                self.next_callback(self.selected_first_page, self.selected_storage, size_mb)
+                self.next_callback(self.selected_first_page, self.selected_storage, size_mb)            
 
         except Exception as e:
             import traceback
@@ -765,14 +863,10 @@ class ExecutionPage(QWidget):
         btn_layout = QHBoxLayout()
         self.btn_back = QPushButton("上一步")
         self.btn_exec = QPushButton("开始执行")
-        for btn in [self.btn_back, self.btn_exec]:
-            btn.setMinimumHeight(36)
-            btn.setFont(QFont("Microsoft YaHei",10,QFont.Bold))
-            btn.setStyleSheet("""
-                QPushButton{background-color:#1a73e8;color:white;border-radius:8px;padding:6px 18px;}
-                QPushButton:hover{background-color:#1669c1;}
-                QPushButton:pressed{background-color:#0d47a1;}
-            """)
+        
+        # 设置初始按钮样式
+        self.set_buttons_enabled(True)
+        
         self.btn_back.clicked.connect(self.back_callback)
         self.btn_exec.clicked.connect(self.start_exec)
         logger.debug("绑定开始执行按钮信号完成")
@@ -781,6 +875,49 @@ class ExecutionPage(QWidget):
         card_layout.addLayout(btn_layout)
 
         layout.addWidget(card)
+    def set_buttons_enabled(self, enabled):
+        """统一设置按钮状态，禁用时变为灰色"""
+        self.btn_exec.setEnabled(enabled)
+        self.btn_back.setEnabled(enabled)
+        
+        if enabled:
+            # 正常样式 - 启用状态
+            normal_style = """
+                QPushButton {
+                    background-color: #1a73e8;
+                    color: white;
+                    border-radius: 8px;
+                    padding: 6px 18px;
+                    border: none;
+                }
+                QPushButton:hover {
+                    background-color: #1669c1;
+                }
+                QPushButton:pressed {
+                    background-color: #0d47a1;
+                }
+            """
+            self.btn_exec.setStyleSheet(normal_style)
+            self.btn_back.setStyleSheet(normal_style)
+            self.btn_exec.setText("开始执行")
+            
+        else:
+            # 禁用样式 - 灰色
+            disabled_style = """
+                QPushButton {
+                    background-color: #cccccc;
+                    color: #666666;
+                    border-radius: 8px;
+                    padding: 6px 18px;
+                    border: 1px solid #aaaaaa;
+                }
+            """
+            self.btn_exec.setStyleSheet(disabled_style)
+            self.btn_back.setStyleSheet(disabled_style)
+            self.btn_exec.setText("执行中...")
+        
+        # 强制UI更新
+        QApplication.processEvents()
 
     def set_auto_mode(self, is_auto):
         self.auto_mode = is_auto
@@ -813,9 +950,13 @@ class ExecutionPage(QWidget):
         logger.debug(f"[Debug]--ExecutionPage:load_data ok --")
 
 
+
+    
     def start_exec(self):
         logger.debug("======[Debug]page3: start_exec======")
         try:
+            self.set_buttons_enabled(False)
+            
             if getattr(self, "auto_mode", False):
                 logger.debug("[Debug] 全自动模式执行")
                 # 可直接调用对应程序，无需用户交互
@@ -827,15 +968,24 @@ class ExecutionPage(QWidget):
                 QMessageBox.warning(self, "错误", f"脚本文件不存在！\n路径: {script_path}")
                 return
 
+            '''
             # 检查是否已有进程在运行
             if hasattr(self, 'process') and self.process and self.process.state() == QProcess.Running:
                 QMessageBox.information(self, "提示", "已有程序正在运行，请等待完成。")
                 return
+            '''
+            # 如果已经创建过进程对象，则先断开旧信号
+            if hasattr(self, 'process') and self.process:
+                try:
+                    self.process.readyReadStandardOutput.disconnect()
+                    self.process.readyReadStandardError.disconnect()
+                    self.process.finished.disconnect()
+                    self.process.errorOccurred.disconnect()
+                except TypeError:
+                    pass  # 若信号未连接则忽略
+            else:
+                self.process = QProcess(self)
 
-            # 禁用按钮
-            self.btn_exec.setEnabled(False)
-            self.btn_back.setEnabled(False)
-            #self.btn_cancel.setEnabled(True)  # 添加取消按钮
             self.info_label.setText("执行中，请等待...")
             self.output_text.clear()
 
@@ -849,7 +999,9 @@ class ExecutionPage(QWidget):
             self.process.readyReadStandardError.connect(self.handle_stderr)
             self.process.finished.connect(self.process_finished)
             self.process.errorOccurred.connect(self.handle_process_error)
-            self.process.started.connect(lambda: print("进程已启动"))
+            #self.process.started.connect(lambda: print("进程已启动"))
+
+       
             
             # 启动进程
             self.process.start()
@@ -862,8 +1014,9 @@ class ExecutionPage(QWidget):
         except Exception as e:
             logger.debug(f"启动进程时出错: {e}")
             QMessageBox.critical(self, "错误", f"启动进程失败: {str(e)}")
-            self.reset_buttons()
-
+            #self.reset_buttons()
+            self.set_buttons_enabled(True)  # 重新启用按钮
+    
     def process_finished(self, exit_code, exit_status):
         """进程执行完成"""
         logger.debug(f"进程完成 - 退出代码: {exit_code}, 状态: {exit_status}")
@@ -888,13 +1041,13 @@ class ExecutionPage(QWidget):
             if reply == QMessageBox.Yes:
                 QApplication.quit()  # 只有用户确认时才退出
             else:
-                self.reset_buttons()
+                self.set_buttons_enabled(True)  # 重新启用按钮
                 
         else:
             error_msg = f"外部程序执行失败！退出代码: {exit_code}"
             self.info_label.setText(error_msg)
             QMessageBox.warning(self, "失败", error_msg)
-            self.reset_buttons()
+            self.set_buttons_enabled(True)  # 重新启用按钮
 
     def reset_buttons(self):
         """重置按钮状态"""
@@ -918,15 +1071,15 @@ class ExecutionPage(QWidget):
                 if not self.process.waitForFinished(5000):  # 等待5秒
                     self.process.kill()  # 强制终止
                 self.info_label.setText("执行已取消")
-                self.reset_buttons()
-
+                self.set_buttons_enabled(True)
+    
     def handle_stdout(self):
         try:
             data = self.process.readAllStandardOutput()
             output = data.data().decode("utf-8", errors="ignore").strip()
             if output:
                 self.output_text.append(output)
-                logger.debug(f"STDOUT: {output}") 
+                #logger.debug(f"STDOUT: {output}") 
             
             # 模拟进度条增加
             current_value = self.progress_bar.value()
@@ -942,16 +1095,17 @@ class ExecutionPage(QWidget):
             output = data.data().decode("utf-8", errors="ignore").strip()
             if output:
                 self.output_text.append(f"<font color='red'>错误: {output}</font>")
-                logger.debug(f"STDERR: {output}")
+                #logger.debug(f"STDERR: {output}")
         except Exception as e:
             logger.debug(f"处理标准错误时出错: {e}")
-
+    
     def handle_process_error(self, error):
         """处理进程错误"""
         error_msg = f"进程错误: {error}"
         logger.debug(error_msg)
         self.output_text.append(f"<font color='red'>{error_msg}</font>")
-        self.reset_buttons()
+        #self.reset_buttons()
+        self.set_buttons_enabled(True)  # 重新启用按钮
 
 
         
@@ -966,6 +1120,9 @@ class InitThread(QThread):
         all_disks_data = DP.get_system_disk_partitions()
         filename = f"disk_details_1st.json"
         first_save_path = os.path.join(os.getcwd(),filename)
+        # 写入前先清空文件
+        with open(first_save_path, "w", encoding="utf-8") as f:
+            f.write("")  # 先清空文件内容
         with open(first_save_path,"w",encoding="utf-8") as f:
             json.dump(all_disks_data,f,ensure_ascii=False,indent=2)
             time.sleep(1)  # 模拟延迟
@@ -985,7 +1142,38 @@ class InitWindow(QWidget):
         layout.addWidget(self.progress)   
 
 # ---------------- 主程序 ----------------
+
+
+
 if __name__ == "__main__":
+    
+    def is_admin():
+        """检查是否有管理员权限"""
+        try:
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except:
+            return False
+
+    def run_as_admin():
+        """尝试以管理员权限重新运行自己"""
+        script = sys.executable
+        params = ' '.join(f'"{x}"' for x in sys.argv)
+        try:
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", script, params, None, 1
+            )
+            sys.exit(0)
+        except Exception as e:
+            ctypes.windll.user32.MessageBoxW(0, f"无法以管理员权限重新运行程序！\n{e}", "权限不足", 0)
+            sys.exit(1)
+
+    if not is_admin():
+        # 弹窗提示并尝试以管理员权限重新运行
+        ctypes.windll.user32.MessageBoxW(0, "请以管理员权限运行此程序！将尝试提升权限...", "权限不足", 0)
+        run_as_admin()
+        #sys.exit(1)
+
+    
     app = QApplication(sys.argv)
 
     init_win = InitWindow()
