@@ -197,10 +197,17 @@ class BackupWizard(QMainWindow):
         self.step_widget.hide()  # ✅ 隐藏左侧步骤栏
 
         selected_backup, selected_storage, shrink_space_mb = self.auto_select_partitions()
+        
+        if not selected_backup or not selected_storage:
+            # 自动选择失败，返回模式选择页
+            #QMessageBox.information(self, "提示", "自动选择分区失败，请使用高级模式手动选择分区。")
+            self.go_to_mode_select()
+            return
 
         if not self.page3:
-            self.page3 = ExecutionPage(self.go_to_mode_select)
+            self.page3 = ExecutionPage(self.go_to_mode_select)  # 修改为返回模式选择页
             self.stack.addWidget(self.page3)
+
 
         self.page3.load_data(selected_backup, selected_storage, shrink_space_mb, "selected_partitions.json")
         self.page3.set_auto_mode(True)
@@ -336,7 +343,7 @@ class BackupWizard(QMainWindow):
                 if reply == QMessageBox.Yes:
                     QApplication.quit()  # 只有用户确认时才退出
                 else:
-                    self.reset_buttons()
+                    return [],[],0
         elif not advclone_found:
             logger.debug("advclone not exist.")
             # 自动选择一个可用分区作为 storage
@@ -591,7 +598,7 @@ class ConfirmSelectionPage(QWidget):
 
         self.tree = QTreeWidget()
         #self.tree.setHeaderLabels(["Name","Label","FS","Size","Used","Free","Info"])
-        self.tree.setHeaderLabels(["Name","Size","Used","Free","Info"])
+        self.tree.setHeaderLabels(["Name","Label","Size","Used","Free","Info"])
         self.tree.setColumnWidth(0, 200)   # Name列：200像素
         self.tree.setColumnWidth(0, 200)
         self.tree.setAnimated(True)
@@ -697,8 +704,9 @@ class ConfirmSelectionPage(QWidget):
         root1.setFlags(root1.flags() & ~Qt.ItemIsSelectable)
         self.tree.addTopLevelItem(root1)
         for part in selected_first_page:
+            label = str(part.get("label","") or "")
             info = f"{part.get('Type','')} ({part.get('drive_letter','')}:)" if part.get('drive_letter') else part.get('Type','')
-            item = QTreeWidgetItem([info,
+            item = QTreeWidgetItem([info,label,
                                      f"{self.format_size_auto(part.get('size_bytes', 0))}",
                                      f"{self.format_size_auto(part.get('used_bytes'))}" if part.get('used_bytes') else "",
                                      f"{self.format_size_auto(part.get('free_bytes'))}" if part.get('free_bytes') else "",
@@ -706,7 +714,7 @@ class ConfirmSelectionPage(QWidget):
             item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
             root1.addChild(item)
 
-        # 可选存储分区
+        # 可选压缩分区/AdvClone
         self.partition_forbackup_items = []
         root2 = QTreeWidgetItem(["可选压缩分区/AdvClone"])
         root2.setFlags(root2.flags() & ~Qt.ItemIsSelectable)
@@ -722,6 +730,7 @@ class ConfirmSelectionPage(QWidget):
             root2.addChild(disk_item)
             # 找到advclone分区，默认选择它，其他不可选
             for part in disk["Partitions"]:
+                label= str(part.get("label","") or "")
                 label_lower = (part.get("label") or "").lower()
                 logger.debug(f"[Debug]Finding advclone...\n{part}")
                 if label_lower == "advclone":
@@ -729,6 +738,7 @@ class ConfirmSelectionPage(QWidget):
                     advclone_found = True
                     self.selected_advclone_storage = [part]
                     item = QTreeWidgetItem([f"{part.get('Type','')} ({part.get('drive_letter','')})",
+                                            label,
                                             f"{self.format_size_auto(part.get('size_bytes', 0))}",
                                             f"{part.get('used_bytes',0)/1024**3:.2f} GB",
                                             f"--",
@@ -772,12 +782,12 @@ class ConfirmSelectionPage(QWidget):
             logger.debug("======[Debug]ConfirmSelectionPage: go_next======")
             logger.debug(f"self.selected_first_page: {self.selected_first_page}")
 
-            # 读取第二部分（可选存储分区）中被勾选的项
+            # 读取第二部分（可选压缩分区/AdvClone）中被勾选的项
             self.selected_storage = []
             storage_root = None
             for i in range(self.tree.topLevelItemCount()):
                 root = self.tree.topLevelItem(i)
-                if root.text(0) == "可选存储分区":
+                if root.text(0) == "可选压缩分区/AdvClone":
                     storage_root = root
                     break
 
@@ -1032,14 +1042,14 @@ class ExecutionPage(QWidget):
         
         # 根据退出代码显示不同消息
         if exit_code == 0:
-            success_msg = "外部程序执行成功！"
+            success_msg = "执行成功！"
             self.info_label.setText(success_msg)
             
             # 询问用户是否继续
             reply = QMessageBox.question(
                 self, 
                 "完成", 
-                f"{success_msg}\n\n点击 Yes 退出程序，点击 No 继续使用。",
+                f"{success_msg}\n\n请重启系统\n系统重启后默认进入Windows系统，若在重启后按'F9'则开始备份，按'F10'开始还原\n\n点击 Yes 退出程序，点击 No 继续使用。",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
