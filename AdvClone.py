@@ -6,7 +6,7 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel,
     QPushButton, QTreeWidget, QTreeWidgetItem, QMessageBox,QLineEdit,
-    QHBoxLayout, QStackedWidget, QFrame, QSplitter, QProgressBar, QTextEdit
+    QHBoxLayout, QStackedWidget, QFrame, QSplitter, QProgressBar, QTextEdit,QButtonGroup
 )
 from PyQt5.QtCore import Qt, QSettings, QThread, pyqtSignal, QProcess
 from PyQt5.QtGui import  QFont, QIntValidator
@@ -291,7 +291,7 @@ class BackupWizard(QMainWindow):
     def auto_select_partitions(self):
         """返回 (selected_backup, selected_storage, shrink_space_mb)"""
         selected_backup = []
-        selected_storage = []
+        selected_storage = {}
         total_used_bytes = 0
         advclone_found = False
         
@@ -323,7 +323,7 @@ class BackupWizard(QMainWindow):
             if advclone_available_size_bytes >= need_bytes:
                 logger.debug("\n-->advclone already exist and size is ok.")
                 logger.debug(f"advclone_available_size_bytes={advclone_available_size_bytes}bytes({self.format_size_auto(advclone_available_size_bytes)})")
-                selected_storage = [advclone_part]
+                selected_storage = advclone_part
             else:
                 mesg = f"""advclone 分区空间不足。
     advclone分区可用空间大小: {advclone_available_size_bytes} bytes({self.format_size_auto(advclone_available_size_bytes)})
@@ -349,13 +349,18 @@ class BackupWizard(QMainWindow):
             # 自动选择一个可用分区作为 storage
             for d in self.all_disks:
                 disk = self.all_disks[d]
-                for part in disk["Partitions"]:
-                    logger.debug(f"{part}\npart.get('free_bytes')={part.get('free_bytes')}, need_bytes={need_bytes}")
-                    if part.get('free_bytes') and part.get('free_bytes') >= need_bytes:
-                        logger.debug(f"!!Find the selected_storage!!")
-                        selected_storage = [part]
-                        break
-                if selected_storage:
+                disk_Unallocated = disk.get('Size')-disk.get('AllocatedSize')
+                if disk_Unallocated > need_bytes:
+                    selected_storage = {'DiskNumber': int(d), 'Type':'Unallocated'}
+                else:
+                    for part in disk["Partitions"]:
+                        logger.debug(f"{part}\npart.get('free_bytes')={part.get('free_bytes')}, need_bytes={need_bytes}")
+                        if part.get('free_bytes') and part.get('free_bytes') >= need_bytes:
+                            logger.debug(f"!!Find the selected_storage!!")
+                            selected_storage = part
+                            break
+                if not selected_storage:
+                    logger.error(f"selected_storage is empty!!")
                     break
         
         save_path = os.path.join(os.getcwd(), "selected_partitions.json")
@@ -576,6 +581,8 @@ class ConfirmSelectionPage(QWidget):
         self.need_bytes = 0
         self.selected_first_page = []
         
+        self.partition_button_group = QButtonGroup(self)
+        self.partition_button_group.setExclusive(True)  # 设置互斥
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20,20,20,20)
@@ -604,6 +611,9 @@ class ConfirmSelectionPage(QWidget):
         self.tree.setAnimated(True)
         self.tree.setStyleSheet("QTreeWidget {background:#ffffff;border:none;font-size:12px;} QTreeWidget::item:hover {background:#eaf1fb;}")
         card_layout.addWidget(self.tree)
+        
+        
+        
         
         # 输入框：压缩分区大小
         size_layout = QHBoxLayout()
@@ -694,12 +704,13 @@ class ConfirmSelectionPage(QWidget):
         input_default_bytes = self.need_bytes + 750*1024*1024
         input_default_mb = float(input_default_bytes/1024/1024)
         input_default_gb = float(input_default_bytes/1024/1024/1024)
-        logger.debug(f"input_default_bytes={input_default_bytes} bytes\ninput_default_mb={input_default_mb} MB\ninput_default_gb={input_default_gb} GB")
+        logger.debug(f"[Debug]input_default_bytes={input_default_bytes} bytes\ninput_default_mb={input_default_mb} MB\ninput_default_gb={input_default_gb} GB")
         self.size_input.setText(str(int(input_default_mb+1)))
 
         self.tree.clear()
 
         # 已选备份分区
+        logger.debug(f"[Debug]加载已选备份分区")
         root1 = QTreeWidgetItem(["已选择备份分区"])
         root1.setFlags(root1.flags() & ~Qt.ItemIsSelectable)
         self.tree.addTopLevelItem(root1)
@@ -714,17 +725,21 @@ class ConfirmSelectionPage(QWidget):
             item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
             root1.addChild(item)
 
-        # 可选压缩分区/AdvClone
+        # 可选压缩分区/存储备份文件分区
+        logger.debug(f"[Debug]可选压缩分区/存储备份文件分区")
         self.partition_forbackup_items = []
-        root2 = QTreeWidgetItem(["可选压缩分区/AdvClone"])
+        root2 = QTreeWidgetItem(["可选压缩分区/存储备份文件分区"])
         root2.setFlags(root2.flags() & ~Qt.ItemIsSelectable)
         self.tree.addTopLevelItem(root2)
         advclone_found = False
         self.selected_advclone_storage=[]
         for d in self.all_disks:
             disk=self.all_disks.get(d)
-            title_key='disk%s'%d
-            title={title_key:disk.get('FriendlyName')}
+            disk_name=disk.get('FriendlyName')
+            #print(f"disk={disk}")
+            title_key='disk%s:%s'%(d,disk_name)
+            title={title_key:disk_name}
+            disk_Unallocated= disk.get('Size')-disk.get('AllocatedSize')
             disk_item = QTreeWidgetItem(title)
             disk_item.setFlags(disk_item.flags() & ~Qt.ItemIsSelectable)
             root2.addChild(disk_item)
@@ -750,7 +765,9 @@ class ConfirmSelectionPage(QWidget):
                     self.partition_forbackup_items.append(part)
                     break
                 logger.debug(f"advclone_found={advclone_found}")   
-            if advclone_found == False:         
+            if advclone_found == False :      
+               #如果没有advclone分区，且没有未分配空间或者未分配空间大小不足的时候，让用户自己选择
+                logger.debug(f"No advclone , load partition to choose for shrink")
                 for part in disk["Partitions"]:
                     free_bytes = part.get("free_bytes",0)
                     logger.debug(f"[Debug]找到其他满足大小的分区ing:\n{part}\nfree_bytes={free_bytes}")
@@ -759,6 +776,7 @@ class ConfirmSelectionPage(QWidget):
                         label = part.get("label") or ""
                         #part_info = f"{part.get('Type','')} ({part.get('drive_letter','')}:)" if part.get('drive_letter') else part.get('Type','')
                         item = QTreeWidgetItem([f"{part.get('Type','')} ({part.get('drive_letter','')})",
+                                                f"{label}",
                                                 f"{self.format_size_auto(part.get('size_bytes', 0))}",
                                                 f"{part.get('used_bytes',0)/1024**3:.2f} GB",
                                                 f"{free_bytes/1024**3:.2f} GB",
@@ -771,10 +789,63 @@ class ConfirmSelectionPage(QWidget):
                             item.setFlags(item.flags() | Qt.ItemIsEnabled)
                         disk_item.addChild(item)
                         self.partition_forbackup_items.append(part)
-                        
+                logger.debug(f"load disk Unallocated")
+                if disk_Unallocated > int(self.need_bytes):
+                    part={'DiskNumber':int(d), 'Type':'Unallocated'}
+                    item = QTreeWidgetItem([f"Unallocated",
+                                            "",
+                                            f"{self.format_size_auto(disk_Unallocated)}",
+                                            "--",
+                                            "--",
+                                            str("Unallocated")])
+                    item.setData(0, Qt.UserRole, part)  # 绑定分区数据
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    item.setCheckState(0, Qt.Unchecked)
+                    disk_item.addChild(item)
+                    self.partition_forbackup_items.append(part)
+                
+        self.tree.itemChanged.connect(self.on_item_changed)                
         self.tree.expandAll()
+        print(f"self.partition_forbackup_items={self.partition_forbackup_items}")
 
+    def on_item_changed(self, item, column):
+        """确保在可选分区中只能勾选一个"""
+        try:
+            if not hasattr(self, "_handling_check"):
+                self._handling_check = False
+            if self._handling_check:
+                return
 
+            # 只关心可选压缩分区节点下的项
+            top_item = item
+            while top_item.parent():
+                top_item = top_item.parent()
+            if top_item.text(0) != "可选压缩分区/存储备份文件分区":
+                return
+
+            # 如果当前项被勾选，则取消同级别的其他勾选
+            if item.checkState(0) == Qt.Checked:
+                self._handling_check = True
+                parent = item.parent()
+                if parent:
+                    for i in range(parent.childCount()):
+                        sibling = parent.child(i)
+                        if sibling is not item and sibling.checkState(0) == Qt.Checked:
+                            sibling.setCheckState(0, Qt.Unchecked)
+                else:
+                    # 没有父节点时，遍历所有子磁盘项的分区
+                    for i in range(self.tree.topLevelItemCount()):
+                        root = self.tree.topLevelItem(i)
+                        if root.text(0) == "可选压缩分区/存储备份文件分区":
+                            for d in range(root.childCount()):
+                                disk_item = root.child(d)
+                                for p in range(disk_item.childCount()):
+                                    other = disk_item.child(p)
+                                    if other is not item and other.checkState(0) == Qt.Checked:
+                                        other.setCheckState(0, Qt.Unchecked)
+                self._handling_check = False
+        except Exception as e:
+            print(f"[Error] on_item_changed: {e}")
         
         
     def go_next(self):
@@ -782,12 +853,12 @@ class ConfirmSelectionPage(QWidget):
             logger.debug("======[Debug]ConfirmSelectionPage: go_next======")
             logger.debug(f"self.selected_first_page: {self.selected_first_page}")
 
-            # 读取第二部分（可选压缩分区/AdvClone）中被勾选的项
+            # 读取第二部分（可选压缩分区/存储备份文件分区）中被勾选的项
             self.selected_storage = []
             storage_root = None
             for i in range(self.tree.topLevelItemCount()):
                 root = self.tree.topLevelItem(i)
-                if root.text(0) == "可选压缩分区/AdvClone":
+                if root.text(0) == "可选压缩分区/存储备份文件分区":
                     storage_root = root
                     break
 
@@ -798,12 +869,15 @@ class ConfirmSelectionPage(QWidget):
             # 遍历 storage_root 下的磁盘节点和分区节点，收集被勾选的
             for d in range(storage_root.childCount()):
                 disk_item = storage_root.child(d)
+                print(f"disk_item={disk_item}")
                 for p in range(disk_item.childCount()):
                     item = disk_item.child(p)
+                    print(f"[Debug]item={item}, item.checkState(0)={item.checkState(0)}, Qt.Checked={Qt.Checked}")
                     if item.checkState(0) == Qt.Checked:
                         part = item.data(0, Qt.UserRole)
+                        print(f"[Debug]part={part}")
                         if part:
-                            self.selected_storage.append(part)
+                            self.selected_storage=part
 
             logger.debug(f"self.selected_storage:{self.selected_storage}")
 
@@ -948,16 +1022,23 @@ class ExecutionPage(QWidget):
         self.save_path = save_path
 
         backup_info = "\n".join([f"{p.get('Type')} ({p.get('drive_letter','')}): {p.get('size','')}{p.get('size_unit','')}" for p in selected_backup])
-        storage_info = "\n".join([f"{p.get('Type')} ({p.get('drive_letter','')}): {p.get('free_bytes',0)/1024**3:.2f} GB 可用" for p in selected_storage])
-        for p in selected_storage:
+        print(f"[Debug]selected_storage={selected_storage},{type(selected_storage)}")
+        if selected_storage.get('Type')=='Unallocated':
+            storage_info = "\nThe unallocated disk space will be formatted to store backup data."
+            message=f"已选择备份分区:\n{backup_info}\n\n存储备份文件空间:{storage_info}\n"                    
+            self.info_label.setText(message)
+        else:
+            p = selected_storage
+            storage_info = "\n".join(f"{p.get('Type')} ({p.get('drive_letter','')}): {p.get('free_bytes',0)/1024**3:.2f} GB 可用")
             try:
                 label=p.get('label')
                 if label == 'advclone':
-                    message=f"已选择备份分区:\n{backup_info}\n\nadvclone已存在，且空间大下为:\n{storage_info}\n\n备份所需空间大小: {self.shrink_space_mb} MB\n"
+                    message=f"已选择备份分区:\n{backup_info}\n\nadvclone已存在，且空间大下为:\n{storage_info}\n\n备份所需空间大小: {self.shrink_space_mb} MB\n"                    
                     self.info_label.setText(message)
                 else:
                     message=f"已选择备份分区:\n{backup_info}\n\n待压缩空间分区:\n{storage_info}\n\n压缩分区大小: {self.shrink_space_mb} MB"
                     self.info_label.setText(message)
+                logger.debug(message)
             except Exception as e:
                 logger.debug(f"执行出错: {e}")
                 return {e}

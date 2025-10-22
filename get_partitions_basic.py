@@ -335,7 +335,7 @@ class basic_disk_patitions:
         #print(disk_infos)
         return disk_infos
 # 使用示例
-
+'''
 manager = basic_disk_patitions()
 #boot=manager.get_boot_disk()
 #print(boot)
@@ -347,3 +347,4 @@ print(ltr)
 info = manager.get_system_disk_partitions()
 
 print("---1---\n",info)
+'''

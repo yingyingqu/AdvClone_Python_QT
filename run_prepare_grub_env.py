@@ -221,7 +221,7 @@ def get_available_drive_letter(exclude=('A','B','C')):
         
 def shrink_and_create_with_diskpart(disk_number, partition_number, shrink_size_mb, 
                                   new_drive_letter=None, new_label=None):
-    logmsg=f"[Func]shrink_and_create_with_diskpart: disk_number={disk_number},partition_number={partition_number}, shrink_size_mb={shrink_size_mb}, new_drive_letter={new_drive_letter}----->>>>>>"
+    logmsg=f"[Func]shrink_and_create_with_diskpart: disk_number={disk_number},partition_number={partition_number}, shrink_size_mb={shrink_size_mb}, new_drive_letter={new_drive_letter}, new_label={new_label}----->>>>>>"
     #print(logmsg)  
     logger.debug(logmsg)    
     """
@@ -238,6 +238,35 @@ def shrink_and_create_with_diskpart(disk_number, partition_number, shrink_size_m
 select disk {disk_number}
 select partition {partition_number}
 shrink desired={shrink_size_mb}
+create partition primary
+assign letter={new_drive_letter}
+format fs=ntfs label="{new_label}" quick
+exit
+"""
+    try:
+        run_diskpart(diskpart_script)
+    except Exception as e:
+        infomsg=f"ERROR:\n{e}"
+        logger.error(infomsg)
+        #print(f"执行出错: {e}")
+        return {e}
+
+def format_unAllocated_with_diskpart(disk_number, new_drive_letter=None, new_label=None):
+    logmsg=f"[Func]format_unAllocated_with_diskpart: disk_number={disk_number},new_drive_letter={new_drive_letter}, new_label={new_label}----->>>>>>"
+    #print(logmsg)  
+    logger.debug(logmsg)    
+    """
+    使用 diskpart 创建分区，完全避免提示
+    """
+    
+    if not new_drive_letter:
+        new_drive_letter = get_available_drive_letter()
+    if not new_label:
+        new_label = 'advclone'
+    
+    # 创建 diskpart 脚本
+    diskpart_script = f"""
+select disk {disk_number}
 create partition primary
 assign letter={new_drive_letter}
 format fs=ntfs label="{new_label}" quick
@@ -334,15 +363,20 @@ def save_json_data(json_data, save_path):
     with open(save_path,"w",encoding="utf-8") as f:
         json.dump(json_data,f,ensure_ascii=False,indent=2)
         
-def prepare_advclone_partition(storage_list, shrink_space_mb):
-    logmsg=f"[Func]prepare_advclone_partition: storage_list={storage_list},shrink_space_mb={shrink_space_mb}----->>>>>>"
+def prepare_advclone_partition(storage_selected, shrink_space_mb):
+    logmsg=f"[Func]prepare_advclone_partition: storage_list={storage_selected},shrink_space_mb={shrink_space_mb}----->>>>>>"
     #print(logmsg)
     logger.debug(logmsg)
-
-    for part in storage_list:
-
-        label = (part.get("label") or "").lower()
-        disk_num = part.get("DiskNumber")
+    part = storage_selected
+    disk_num = part.get("DiskNumber")
+    if storage_selected.get('Type')=='Unallocated':
+        logger.debug(f"Use Unallocated--->")
+        free_letter = get_available_drive_letter()
+        if free_letter:
+            format_unAllocated_with_diskpart(disk_num, free_letter)
+            return free_letter
+    else:
+        label = (part.get("label") or "").lower()        
         partition_num = part.get("PartitionNumber")
         size_bytes = part.get("size_bytes", 0)
         drive_letter = part.get("drive_letter")
@@ -352,7 +386,7 @@ def prepare_advclone_partition(storage_list, shrink_space_mb):
         if label == "advclone":
             if size_bytes >= required_bytes:
                 if not drive_letter:
-                    free_letter = get_available_drive_letter()
+                    
                     if free_letter:
                         out= assign_drive_letter(disk_num, partition_num, free_letter)
                         if out != None:
