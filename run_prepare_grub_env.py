@@ -125,7 +125,7 @@ def runCmd(cmd: str, timeout: int = 60) -> str:
 
     # 在 Windows 上强制英文，使用 chcp 65001 临时切换为 UTF-8
     if os.name == "nt":
-        cmd = f'chcp 65001>nul & {cmd}'
+        cmd = f"chcp 65001>nul && {cmd}"
 
     try:
         result = subprocess.run(
@@ -558,7 +558,7 @@ def modify_boot_order(EFImountLTR: str):
     infomsg=f"[STEP1]bcdedit copy bootmgr"
     logger.info(infomsg)
     #print("[STEP1] 复制 bootmgr 启动项")    
-    output = runCmd('bcdedit /copy {bootmgr} /d "AdvClone"')
+    output = runCmd("bcdedit /copy {bootmgr} /d 'AdvClone'")
     #logger.info(output)
 
     # 用正则提取 {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
@@ -695,8 +695,8 @@ if __name__=="__main__":
         logmsg=f"backup_parts_str:{backup_parts_str}"
         logger.debug(logmsg)
         
-        #print("[Step]====== 找到advclone的分区，sda编号（sort by offset）====== ")
-        infomsg=f"[Step]====== Get advclone partition index with sda（sort by offset）====== "
+        #print("[Step]====== 找到advclone的分区，sda编号(sort by offset)====== ")
+        infomsg=f"[Step]====== Get advclone partition index with sda(sort by offset)====== "
         logger.info(infomsg)
         for d in all_disks_data_new:
             d_disk=all_disks_data_new.get(d)
@@ -781,7 +781,9 @@ if __name__=="__main__":
         #print(f"\n[Step]====== Finish ======\n")
         infomsg=f"\n[Step]====== Finish ======\n"
         logger.info(infomsg)
+        sys.exit(0)
     except Exception as e:
         infomsg=f"main ERROR:\n{e}"
         logger.error(infomsg)
         #print(f"main执行异常捕获：{e}" )
+        sys.exit(1)

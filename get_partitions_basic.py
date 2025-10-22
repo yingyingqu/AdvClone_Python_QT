@@ -145,7 +145,7 @@ class basic_disk_patitions:
         return size * unit_multipliers.get(unit.upper(), 1)
         
     def get_boot_disk(self):
-        ps_cmd = r"""Get-Disk | Where-Object {$_.IsBoot -eq $true} | Select Number, FriendlyName, Size, PartitionStyle, IsBoot, IsSystem|ConvertTo-Json -Compress"""
+        ps_cmd = r"""Get-Disk | Where-Object {$_.IsBoot -eq $true} | Select Number, FriendlyName, Size, AllocatedSize, PartitionStyle, IsBoot, IsSystem|ConvertTo-Json -Compress"""
         try:
             output=self.run_powershell(ps_cmd)
             #print(type(output),output)
@@ -335,8 +335,11 @@ class basic_disk_patitions:
         #print(disk_infos)
         return disk_infos
 # 使用示例
-'''
+
 manager = basic_disk_patitions()
+#boot=manager.get_boot_disk()
+#print(boot)
+
 
 ltr = manager.get_system_letter(1)
 print(ltr)
@@ -344,4 +347,3 @@ print(ltr)
 info = manager.get_system_disk_partitions()
 
 print("---1---\n",info)
-'''
