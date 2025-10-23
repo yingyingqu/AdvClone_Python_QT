@@ -370,7 +370,7 @@ def prepare_advclone_partition(storage_selected, shrink_space_mb):
     part = storage_selected
     disk_num = part.get("DiskNumber")
     if storage_selected.get('Type')=='Unallocated':
-        logger.debug(f"Use Unallocated--->")
+        logger.info(f"The unallocated disk space will be formatted to store backup data.")
         free_letter = get_available_drive_letter()
         if free_letter:
             format_unAllocated_with_diskpart(disk_num, free_letter)

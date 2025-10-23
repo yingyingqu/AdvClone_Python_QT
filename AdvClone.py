@@ -1,15 +1,17 @@
 # -*- coding:utf-8 -*-
-import os, sys, re
+import os, sys, re, time
 import json
 import subprocess
 from datetime import datetime
+
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel,
     QPushButton, QTreeWidget, QTreeWidgetItem, QMessageBox,QLineEdit,
     QHBoxLayout, QStackedWidget, QFrame, QSplitter, QProgressBar, QTextEdit,QButtonGroup
 )
-from PyQt5.QtCore import Qt, QSettings, QThread, pyqtSignal, QProcess
+from PyQt5.QtCore import Qt, QSettings, QThread, pyqtSignal, QProcess, QTimer
 from PyQt5.QtGui import  QFont, QIntValidator
+
 import ctypes
 
 import time, logging
@@ -351,12 +353,14 @@ class BackupWizard(QMainWindow):
                 disk = self.all_disks[d]
                 disk_Unallocated = disk.get('Size')-disk.get('AllocatedSize')
                 if disk_Unallocated > need_bytes:
-                    selected_storage = {'DiskNumber': int(d), 'Type':'Unallocated'}
+                    selected_storage = {'DiskNumber': int(d),'size_bytes':disk_Unallocated, 'Type':'Unallocated'}
                 else:
-                    for part in disk["Partitions"]:
+                    # 按 OffsetBytes 逆序排序
+                    sorted_data = sorted(disk["Partitions"], key=lambda x: x['OffsetBytes'], reverse=True)
+                    for part in sorted_data:                        
                         logger.debug(f"{part}\npart.get('free_bytes')={part.get('free_bytes')}, need_bytes={need_bytes}")
                         if part.get('free_bytes') and part.get('free_bytes') >= need_bytes:
-                            logger.debug(f"!!Find the selected_storage!!")
+                            logger.debug(f"!!Find the selected_storage:{part}!!")
                             selected_storage = part
                             break
                 if not selected_storage:
@@ -791,7 +795,7 @@ class ConfirmSelectionPage(QWidget):
                         self.partition_forbackup_items.append(part)
                 logger.debug(f"load disk Unallocated")
                 if disk_Unallocated > int(self.need_bytes):
-                    part={'DiskNumber':int(d), 'Type':'Unallocated'}
+                    part={'DiskNumber':int(d), 'size_bytes':disk_Unallocated,'Type':'Unallocated'}
                     item = QTreeWidgetItem([f"Unallocated",
                                             "",
                                             f"{self.format_size_auto(disk_Unallocated)}",
@@ -916,6 +920,9 @@ class ExecutionPage(QWidget):
         self.save_path = None
         self.shrink_space_mb = 0
         self.thread = None
+        self.process = None
+        self._quit_requested = False
+        self.auto_mode = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20,20,20,20)
@@ -936,16 +943,14 @@ class ExecutionPage(QWidget):
         self.info_label.setStyleSheet("color:#555;")
         card_layout.addWidget(self.info_label)
 
-        # 进度条
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0,100)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
         card_layout.addWidget(self.progress_bar)
         
-        # 添加输出显示控件
         self.output_text = QTextEdit()
-        self.output_text.setReadOnly(True)  # 只读
+        self.output_text.setReadOnly(True)
         self.output_text.setFont(QFont("Microsoft YaHei", 10))
         self.output_text.setStyleSheet("background:#f5f5f5;color:#333;")
         card_layout.addWidget(self.output_text)
@@ -953,10 +958,9 @@ class ExecutionPage(QWidget):
         btn_layout = QHBoxLayout()
         self.btn_back = QPushButton("上一步")
         self.btn_exec = QPushButton("开始执行")
-        
-        # 设置初始按钮样式
+
         self.set_buttons_enabled(True)
-        
+
         self.btn_back.clicked.connect(self.back_callback)
         self.btn_exec.clicked.connect(self.start_exec)
         logger.debug("绑定开始执行按钮信号完成")
@@ -965,13 +969,15 @@ class ExecutionPage(QWidget):
         card_layout.addLayout(btn_layout)
 
         layout.addWidget(card)
+
+    # ==============================
+    # 公共辅助函数
+    # ==============================
     def set_buttons_enabled(self, enabled):
-        """统一设置按钮状态，禁用时变为灰色"""
         self.btn_exec.setEnabled(enabled)
         self.btn_back.setEnabled(enabled)
         
         if enabled:
-            # 正常样式 - 启用状态
             normal_style = """
                 QPushButton {
                     background-color: #1a73e8;
@@ -990,9 +996,7 @@ class ExecutionPage(QWidget):
             self.btn_exec.setStyleSheet(normal_style)
             self.btn_back.setStyleSheet(normal_style)
             self.btn_exec.setText("开始执行")
-            
         else:
-            # 禁用样式 - 灰色
             disabled_style = """
                 QPushButton {
                     background-color: #cccccc;
@@ -1005,15 +1009,27 @@ class ExecutionPage(QWidget):
             self.btn_exec.setStyleSheet(disabled_style)
             self.btn_back.setStyleSheet(disabled_style)
             self.btn_exec.setText("执行中...")
-        
-        # 强制UI更新
+
         QApplication.processEvents()
+
+    def format_size_auto(self, size_bytes):
+        if size_bytes <= 0:
+            return ""
+        units = [(1024**3, "GB"), (1024**2,"MB"),(1024,"KB"),(1,"B")]
+        for threshold, unit in units:
+            if size_bytes >= threshold:
+                size = size_bytes / threshold
+                return f"{size:.2f} {unit}"
+        return f"{size_bytes} B"
 
     def set_auto_mode(self, is_auto):
         self.auto_mode = is_auto
         if is_auto:
             self.info_label.setText("全自动模式：即将开始执行备份...") 
-            
+
+    # ==============================
+    # 数据加载逻辑
+    # ==============================
     def load_data(self, selected_backup, selected_storage, shrink_space_mb, save_path):
         logger.debug(f"[Debug]--ExecutionPage:load_data--")
         self.selected_backup = selected_backup
@@ -1021,168 +1037,161 @@ class ExecutionPage(QWidget):
         self.shrink_space_mb = shrink_space_mb
         self.save_path = save_path
 
-        backup_info = "\n".join([f"{p.get('Type')} ({p.get('drive_letter','')}): {p.get('size','')}{p.get('size_unit','')}" for p in selected_backup])
-        print(f"[Debug]selected_storage={selected_storage},{type(selected_storage)}")
-        if selected_storage.get('Type')=='Unallocated':
-            storage_info = "\nThe unallocated disk space will be formatted to store backup data."
-            message=f"已选择备份分区:\n{backup_info}\n\n存储备份文件空间:{storage_info}\n"                    
+        backup_info = "\n".join([
+            f"{p.get('Type')} ({p.get('drive_letter','')}): {p.get('size','')}{p.get('size_unit','')}"
+            for p in selected_backup
+        ])
+
+        if selected_storage.get('Type') == 'Unallocated':
+            size_unallocated = self.format_size_auto(selected_storage.get('size_bytes'))
+            storage_info = (
+                f"\n磁盘上未分配的空间 {size_unallocated} 将被格式化，用于存储备份数据。\n"
+                "如果选择“开始执行”，全部未分配空间将被格式化并使用；"
+                "否则请关闭程序手动格式化分区后再启用 AdvClone。"
+            )
+            message = f"已选择备份分区:\n{backup_info}\n\n存储目标:{storage_info}\n"
             self.info_label.setText(message)
         else:
             p = selected_storage
-            storage_info = "\n".join(f"{p.get('Type')} ({p.get('drive_letter','')}): {p.get('free_bytes',0)/1024**3:.2f} GB 可用")
-            try:
-                label=p.get('label')
-                if label == 'advclone':
-                    message=f"已选择备份分区:\n{backup_info}\n\nadvclone已存在，且空间大下为:\n{storage_info}\n\n备份所需空间大小: {self.shrink_space_mb} MB\n"                    
-                    self.info_label.setText(message)
-                else:
-                    message=f"已选择备份分区:\n{backup_info}\n\n待压缩空间分区:\n{storage_info}\n\n压缩分区大小: {self.shrink_space_mb} MB"
-                    self.info_label.setText(message)
-                logger.debug(message)
-            except Exception as e:
-                logger.debug(f"执行出错: {e}")
-                return {e}
-        
+            label = p.get('label', '')
+            storage_info = f"{p.get('Type')} ({p.get('drive_letter','')}): {p.get('free_bytes',0)/1024**3:.2f} GB 可用"
+            if label == 'advclone':
+                message = (
+                    f"已选择备份分区:\n{backup_info}\n\n"
+                    f"advclone 分区存在，可用空间:\n{storage_info}\n\n"
+                    f"备份所需空间大小: {self.shrink_space_mb} MB"
+                )
+            else:
+                message = (
+                    f"已选择备份分区:\n{backup_info}\n\n"
+                    f"目标分区:\n{storage_info}\n\n"
+                    f"压缩分区大小: {self.shrink_space_mb} MB"
+                )
+            self.info_label.setText(message)
+            logger.debug(message)
+
         self.progress_bar.setValue(0)
         logger.debug(f"[Debug]--ExecutionPage:load_data ok --")
 
-
-
-    
+    # ==============================
+    # 主执行逻辑
+    # ==============================
     def start_exec(self):
         logger.debug("======[Debug]page3: start_exec======")
         try:
             self.set_buttons_enabled(False)
-            
+
+            # 检查自动模式并处理未分配空间
             if getattr(self, "auto_mode", False):
                 logger.debug("[Debug] 全自动模式执行")
-                # 可直接调用对应程序，无需用户交互
+                if self.selected_storage.get('Type') == 'Unallocated':
+                    size_unallocated = self.format_size_auto(self.selected_storage.get('size_bytes'))
+                    storage_info = (
+                        f"\n磁盘上未分配的空间 {size_unallocated} 将被格式化，用于存储备份数据。\n\n"
+                        "选择“继续”: 全部未分配空间将被格式化并使用；\n"
+                        "选择“退出”: 程序将退出（退出后请先手动将未分配空间格式化后再次启用AdvClone程序）。"
+                    )
+                    msg_box = QMessageBox()
+                    msg_box.setIcon(QMessageBox.Question)
+                    msg_box.setWindowTitle("确认操作")
+                    msg_box.setText(storage_info)
+                    msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                    msg_box.button(QMessageBox.Yes).setText("继续")
+                    msg_box.button(QMessageBox.No).setText("退出")
+                    result = msg_box.exec_()
+                    if result == QMessageBox.No:
+                        logger.debug("用户选择退出")
+                        self.safe_quit()
+                        return
+                    if result == QMessageBox.Yes:
+                        print("用户选择继续（使用全部的未分配空间）")
+                        logger.debug("用户选择继续（使用全部的未分配空间）")
 
+
+            # 外部程序路径
             script_path = os.path.join(os.getcwd(), "run_prepare_grub_env.exe")
-            
-            #script_path = r"C:\Program Files (x86)\Notepad++\notepad++.exe"
             if not os.path.exists(script_path):
                 QMessageBox.warning(self, "错误", f"脚本文件不存在！\n路径: {script_path}")
+                self.set_buttons_enabled(True)
                 return
 
-            '''
-            # 检查是否已有进程在运行
-            if hasattr(self, 'process') and self.process and self.process.state() == QProcess.Running:
-                QMessageBox.information(self, "提示", "已有程序正在运行，请等待完成。")
-                return
-            '''
-            # 如果已经创建过进程对象，则先断开旧信号
-            if hasattr(self, 'process') and self.process:
+            # 清理旧进程（若存在）
+            if self.process:
                 try:
                     self.process.readyReadStandardOutput.disconnect()
                     self.process.readyReadStandardError.disconnect()
                     self.process.finished.disconnect()
                     self.process.errorOccurred.disconnect()
-                except TypeError:
-                    pass  # 若信号未连接则忽略
-            else:
-                self.process = QProcess(self)
+                except Exception:
+                    pass
+                if self.process.state() == QProcess.Running:
+                    self.process.terminate()
+                    self.process.waitForFinished(1000)
+                self.process.deleteLater()
 
-            self.info_label.setText("执行中，请等待...")
-            self.output_text.clear()
-
-            # 启动外部程序
+            # 创建新进程
             self.process = QProcess(self)
             self.process.setProgram(script_path)
             self.process.setWorkingDirectory(os.getcwd())
-            
-            # 连接所有信号
+
+            # 信号连接
             self.process.readyReadStandardOutput.connect(self.handle_stdout)
             self.process.readyReadStandardError.connect(self.handle_stderr)
             self.process.finished.connect(self.process_finished)
             self.process.errorOccurred.connect(self.handle_process_error)
-            #self.process.started.connect(lambda: print("进程已启动"))
 
-       
-            
-            # 启动进程
+            # 启动
+            self.info_label.setText("执行中，请等待...")
+            self.output_text.clear()
             self.process.start()
-            
-            if not self.process.waitForStarted(5000):  # 等待5秒启动
+            if not self.process.waitForStarted(5000):
                 raise Exception("进程启动超时")
-                
+
             self.progress_bar.setValue(10)
-            
+
         except Exception as e:
             logger.debug(f"启动进程时出错: {e}")
             QMessageBox.critical(self, "错误", f"启动进程失败: {str(e)}")
-            #self.reset_buttons()
-            self.set_buttons_enabled(True)  # 重新启用按钮
-    
+            self.set_buttons_enabled(True)
+
+    # ==============================
+    # 进程信号处理
+    # ==============================
     def process_finished(self, exit_code, exit_status):
-        """进程执行完成"""
         logger.debug(f"进程完成 - 退出代码: {exit_code}, 状态: {exit_status}")
-        
-        # 完成进度条
         self.progress_bar.setValue(100)
-        
-        # 根据退出代码显示不同消息
+
+        if getattr(self, "_quit_requested", False):
+            logger.debug("process_finished: 检测到退出请求 -> 立即退出")
+            QTimer.singleShot(0, QApplication.quit)
+            return
+
         if exit_code == 0:
             success_msg = "执行成功！"
             self.info_label.setText(success_msg)
-            
-            # 询问用户是否继续
             reply = QMessageBox.question(
-                self, 
-                "完成", 
+                self, "完成",
                 f"{success_msg}\n\n请重启系统\n系统重启后默认进入Windows系统，若在重启后按'F9'则开始备份，按'F10'开始还原\n\n点击 Yes 退出程序，点击 No 继续使用。",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
             )
-            
             if reply == QMessageBox.Yes:
-                QApplication.quit()  # 只有用户确认时才退出
+                self.safe_quit()
             else:
-                self.set_buttons_enabled(True)  # 重新启用按钮
-                
+                self.set_buttons_enabled(True)
         else:
             error_msg = f"外部程序执行失败！退出代码: {exit_code}"
             self.info_label.setText(error_msg)
             QMessageBox.warning(self, "失败", error_msg)
-            self.set_buttons_enabled(True)  # 重新启用按钮
+            self.set_buttons_enabled(True)
 
-    def reset_buttons(self):
-        """重置按钮状态"""
-        self.btn_exec.setEnabled(True)
-        self.btn_back.setEnabled(True)
-        if hasattr(self, 'btn_cancel'):
-            self.btn_cancel.setEnabled(False)
-
-    def cancel_execution(self):
-        """取消执行"""
-        if hasattr(self, 'process') and self.process and self.process.state() == QProcess.Running:
-            reply = QMessageBox.question(
-                self, 
-                "确认取消", 
-                "确定要终止正在运行的程序吗？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                self.process.terminate()
-                if not self.process.waitForFinished(5000):  # 等待5秒
-                    self.process.kill()  # 强制终止
-                self.info_label.setText("执行已取消")
-                self.set_buttons_enabled(True)
-    
     def handle_stdout(self):
         try:
             data = self.process.readAllStandardOutput()
             output = data.data().decode("utf-8", errors="ignore").strip()
             if output:
                 self.output_text.append(output)
-                #logger.debug(f"STDOUT: {output}") 
-            
-            # 模拟进度条增加
-            current_value = self.progress_bar.value()
-            if current_value < 90:
-                self.progress_bar.setValue(current_value + 5)
-                
+            if self.progress_bar.value() < 90:
+                self.progress_bar.setValue(self.progress_bar.value() + 5)
         except Exception as e:
             logger.debug(f"处理标准输出时出错: {e}")
 
@@ -1192,17 +1201,69 @@ class ExecutionPage(QWidget):
             output = data.data().decode("utf-8", errors="ignore").strip()
             if output:
                 self.output_text.append(f"<font color='red'>错误: {output}</font>")
-                #logger.debug(f"STDERR: {output}")
         except Exception as e:
             logger.debug(f"处理标准错误时出错: {e}")
-    
+
     def handle_process_error(self, error):
-        """处理进程错误"""
-        error_msg = f"进程错误: {error}"
-        logger.debug(error_msg)
-        self.output_text.append(f"<font color='red'>{error_msg}</font>")
-        #self.reset_buttons()
-        self.set_buttons_enabled(True)  # 重新启用按钮
+        msg = f"进程错误: {error}"
+        logger.debug(msg)
+        self.output_text.append(f"<font color='red'>{msg}</font>")
+        self.set_buttons_enabled(True)
+
+    # ==============================
+    # 安全退出逻辑
+    # ==============================
+    
+    def safe_quit(self, timeout_ms=5000):
+        """安全退出应用，确保 QProcess 被终止并且日志已写入"""
+        logger.debug("safe_quit: 请求安全退出")
+        self._quit_requested = True
+
+        # ---- 强制写日志缓存 ----
+        # ✅ 确保日志全部写入磁盘
+        for handler in logger.handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+
+        proc = getattr(self, "process", None)
+        if proc and isinstance(proc, QProcess) and proc.state() == QProcess.Running:
+            logger.debug("safe_quit: 检测到子进程正在运行，尝试 terminate()")
+            try:
+                proc.terminate()
+            except Exception as e:
+                logger.debug(f"safe_quit: terminate() 异常: {e}")
+
+            start = time.time()
+            while proc.state() == QProcess.Running and (time.time() - start) < (timeout_ms / 1000.0):
+                QApplication.processEvents()
+                proc.waitForFinished(200)
+
+            if proc.state() == QProcess.Running:
+                logger.debug("safe_quit: 子进程未响应，尝试 kill()")
+                try:
+                    proc.kill()
+                except Exception as e:
+                    logger.debug(f"safe_quit: kill() 异常: {e}")
+                proc.waitForFinished(1000)
+
+        # ✅ 确保日志全部写入磁盘
+        for handler in logger.handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+        QApplication.processEvents()
+        time.sleep(0.1)
+        QTimer.singleShot(0, QApplication.quit)
+
+
+    def closeEvent(self, event):
+        """窗口关闭事件时也安全清理"""
+        logger.debug("closeEvent: 捕获窗口关闭，执行 safe_quit()")
+        self.safe_quit()
+        event.accept()
 
 
         
