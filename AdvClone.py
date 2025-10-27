@@ -327,25 +327,35 @@ class BackupWizard(QMainWindow):
                 logger.debug(f"advclone_available_size_bytes={advclone_available_size_bytes}bytes({self.format_size_auto(advclone_available_size_bytes)})")
                 selected_storage = advclone_part
             else:
-                mesg = f"""advclone 分区空间不足。
-    advclone分区可用空间大小: {advclone_available_size_bytes} bytes({self.format_size_auto(advclone_available_size_bytes)})
-    所需空间: {need_bytes} bytes({self.format_size_auto(need_bytes)})
-    请退出本程序，在设备管理中删除后重新执行。"""
-                #QMessageBox.warning(self,"提示",mesg)
+                mesg = f"""
+advclone分区可用空间大小: {advclone_available_size_bytes} bytes({self.format_size_auto(advclone_available_size_bytes)})
+所需空间: {need_bytes} bytes({self.format_size_auto(need_bytes)})
+
+请退出本程序，在设备磁盘管理中将advclone分区删除后重新执行。"""
                 logger.debug(mesg)
-                # 询问用户是否继续
-                reply = QMessageBox.question(
-                    self, 
-                    "Warning", 
-                    f"{mesg}\n\n点击 Yes 退出程序，点击 No 继续使用。",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No
+                #QMessageBox.warning(self,"提示",mesg)
+                msg_box = QMessageBox(
+                QMessageBox.Warning,  # 图标类型
+                "程序退出",           # 标题
+                "警告：advclone 分区空间不足！",  # 主要文本
+                QMessageBox.Ok,       # 按钮
+                self                  # 父窗口
                 )
+                msg_box.setInformativeText(mesg)
                 
-                if reply == QMessageBox.Yes:
-                    QApplication.quit()  # 只有用户确认时才退出
-                else:
-                    return [],[],0
+                # 显示对话框并等待用户响应
+                reply = msg_box.exec_()
+                
+                # 由于只有 OK 按钮，用户点击后直接退出程序
+                if reply == QMessageBox.Ok:
+                    logger.debug("用户点击了 OK 按钮，程序退出...")
+                    # 再次刷新后退出
+                    for handler in logger.handlers:
+                        handler.flush()
+                    print("用户点击了 OK 按钮，程序退出...")
+                    QApplication.quit()
+                    sys.exit(0)
+
         elif not advclone_found:
             logger.debug("advclone not exist.")
             # 自动选择一个可用分区作为 storage
@@ -363,9 +373,34 @@ class BackupWizard(QMainWindow):
                             logger.debug(f"!!Find the selected_storage:{part}!!")
                             selected_storage = part
                             break
-                if not selected_storage:
-                    logger.error(f"selected_storage is empty!!")
-                    break
+            if not selected_storage:
+                mesg="磁盘各个分区剩余空间不足，未找到可用于存储的分区！"
+                logger.error(f"selected_storage is empty!!")
+                logger.error(mesg)
+                #全自动模式下，没有找到合适分区用于存储
+                msg_box = QMessageBox(
+                QMessageBox.Warning,  # 图标类型
+                "程序退出",           # 标题
+                "警告：没有找到合适分区用于存储！",  # 主要文本
+                QMessageBox.Ok,       # 按钮
+                self                  # 父窗口
+                )
+                msg_box.setInformativeText(mesg)
+                    
+                # 显示对话框并等待用户响应
+                reply = msg_box.exec_()
+                    
+                # 由于只有 OK 按钮，用户点击后直接退出程序
+                if reply == QMessageBox.Ok:
+                    logger.debug("没有找到合适分区用于存储，用户点击了 OK 按钮，程序退出...")
+                    # 再次刷新后退出
+                    for handler in logger.handlers:
+                        handler.flush()
+                    print("没有找到合适分区用于存储，用户点击了 OK 按钮，程序退出...")
+                    QApplication.quit()
+                    sys.exit(0)
+                    
+       
         
         save_path = os.path.join(os.getcwd(), "selected_partitions.json")
 
@@ -554,12 +589,37 @@ class PartitionSelectorPage(QWidget):
                         advclone_size_bytes = part.get("size_bytes",0)
                         advclone_available_size_bytes = advclone_size_bytes - 730*1024*1024
                         if advclone_available_size_bytes < need_bytes:
-                            drive = part.get("drive_letter","")
-                            mesg = f"""advclone 分区 ({drive}) 空间不足。
-    已选要备份的分区总大小: {total_used_bytes} bytes ({self.format_size_auto(total_used_bytes)})
-    所需空间: {need_bytes} bytes({self.format_size_auto(need_bytes)})
-    advclone分区可用空间: {advclone_available_size_bytes} bytes({self.format_size_auto(advclone_available_size_bytes)})"""
-                            QMessageBox.warning(self,"提示",mesg)
+                            
+                            
+                            mesg = f"""
+advclone分区可用空间大小: {advclone_available_size_bytes} bytes({self.format_size_auto(advclone_available_size_bytes)})
+所需空间: {need_bytes} bytes({self.format_size_auto(need_bytes)})
+
+请退出本程序，在设备磁盘管理中将advclone分区删除后重新执行。"""
+                            #QMessageBox.warning(self,"提示",mesg)
+                            logger.debug(mesg)
+                            
+                            msg_box = QMessageBox(
+                            QMessageBox.Warning,  # 图标类型
+                            "程序退出",           # 标题
+                            "警告：advclone 分区空间不足！",  # 主要文本
+                            QMessageBox.Ok,       # 按钮
+                            self                  # 父窗口
+                            )
+                            msg_box.setInformativeText(mesg)
+                                                        
+                            # 显示对话框并等待用户响应
+                            reply = msg_box.exec_()
+                            
+                            # 由于只有 OK 按钮，用户点击后直接退出程序
+                            if reply == QMessageBox.Ok:
+                                logger.debug("用户点击了 OK 按钮，程序退出...")
+                                # 再次刷新后退出
+                                for handler in logger.handlers:
+                                    handler.flush()
+                                print("用户点击了 OK 按钮，程序退出...")
+                                QApplication.quit()
+                                sys.exit(0)
                             return
             # 正常跳转第二页，并传递已选分区
             if hasattr(self, 'next_callback'):
@@ -736,7 +796,6 @@ class ConfirmSelectionPage(QWidget):
         root2.setFlags(root2.flags() & ~Qt.ItemIsSelectable)
         self.tree.addTopLevelItem(root2)
         advclone_found = False
-        self.selected_advclone_storage=[]
         for d in self.all_disks:
             disk=self.all_disks.get(d)
             disk_name=disk.get('FriendlyName')
@@ -755,7 +814,6 @@ class ConfirmSelectionPage(QWidget):
                 if label_lower == "advclone":
                     logger.debug(f"[Debug]Finded advclone...\n")
                     advclone_found = True
-                    self.selected_advclone_storage = [part]
                     item = QTreeWidgetItem([f"{part.get('Type','')} ({part.get('drive_letter','')})",
                                             label,
                                             f"{self.format_size_auto(part.get('size_bytes', 0))}",
@@ -886,7 +944,9 @@ class ConfirmSelectionPage(QWidget):
             logger.debug(f"self.selected_storage:{self.selected_storage}")
 
             if not self.selected_storage:
-                QMessageBox.warning(self,"提示","未找到可用的存储分区！")
+                message=f"磁盘各个分区剩余空间不足，未找到可用于存储的分区！"
+                logger.info(message)
+                QMessageBox.warning(self,"提示",message)
                 return
 
             try:

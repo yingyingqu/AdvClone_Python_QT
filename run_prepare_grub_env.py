@@ -251,10 +251,11 @@ exit
         #print(f"执行出错: {e}")
         return {e}
 
-def format_unAllocated_with_diskpart(disk_number, new_drive_letter=None, new_label=None):
+def format_unAllocated_with_diskpart_0(disk_number, new_drive_letter=None, new_label=None):
     logmsg=f"[Func]format_unAllocated_with_diskpart: disk_number={disk_number},new_drive_letter={new_drive_letter}, new_label={new_label}----->>>>>>"
     #print(logmsg)  
-    logger.debug(logmsg)    
+    logger.debug(logmsg)  
+    logger.info(f"[Debug]start: format_unAllocated_with_diskpart--->>>")    
     """
     使用 diskpart 创建分区，完全避免提示
     """
@@ -273,12 +274,40 @@ format fs=ntfs label="{new_label}" quick
 exit
 """
     try:
+        time.sleep(10)
+        logger.info(f"[Debug]start diskpart--->>>>")
         run_diskpart(diskpart_script)
     except Exception as e:
         infomsg=f"ERROR:\n{e}"
         logger.error(infomsg)
         #print(f"执行出错: {e}")
         return {e}
+
+def format_unAllocated_with_diskpart(disk_number, new_label=None):
+    logmsg=f"[Func]format_unAllocated_with_diskpart: disk_number={disk_number},new_label={new_label}----->>>>>>"
+    #print(logmsg)  
+    logger.debug(logmsg)     
+    """
+    使用 diskpart 创建分区，完全避免提示
+    """
+    if not new_label:
+        new_label = 'advclone'
+    
+    # 创建 diskpart 脚本
+    diskpart_script = f"""
+select disk {disk_number}
+create partition primary
+format fs=ntfs label="{new_label}" quick
+exit
+"""
+    try:
+        run_diskpart(diskpart_script)
+    except Exception as e:
+        infomsg=f"ERROR:\n{e}"
+        logger.error(infomsg)
+        #print(f"执行出错: {e}")
+        return {e}
+
 
 def remove_drive_letter(disk_number, partition_number, drive_letter):
     logmsg=f"[Func]remove_drive_letter: disk_number={disk_number},partition_number={partition_number}, drive_letter={drive_letter}----->>>>>>"
@@ -371,9 +400,21 @@ def prepare_advclone_partition(storage_selected, shrink_space_mb):
     disk_num = part.get("DiskNumber")
     if storage_selected.get('Type')=='Unallocated':
         logger.info(f"The unallocated disk space will be formatted to store backup data.")
-        free_letter = get_available_drive_letter()
+        free_letter = get_available_drive_letter()        
         if free_letter:
-            format_unAllocated_with_diskpart(disk_num, free_letter)
+            logger.info(f"{free_letter} will be used.")
+            time.sleep(10)
+            format_unAllocated_with_diskpart(disk_num)
+            #重新扫描磁盘，获取advclone分区partiton编号，分配盘符
+            rescan_disks(disk_num)
+            disk_data_new = DP.get_system_disk_partitions()
+            partitions_data = disk_data_new[str(disk_num)].get('Partitions')
+            for p in partitions_data:
+                if p.get('label') == 'advclone':
+                    advclone_part_num=p.get('PartitionNumber')
+                    break
+            assign_drive_letter(disk_num, advclone_part_num, free_letter)
+            logger.info(f"[Debug]format_unAllocated_with_diskpart finish.")
             return free_letter
     else:
         label = (part.get("label") or "").lower()        
@@ -386,7 +427,7 @@ def prepare_advclone_partition(storage_selected, shrink_space_mb):
         if label == "advclone":
             if size_bytes >= required_bytes:
                 if not drive_letter:
-                    
+                    free_letter = get_available_drive_letter()
                     if free_letter:
                         out= assign_drive_letter(disk_num, partition_num, free_letter)
                         if out != None:
@@ -416,6 +457,8 @@ def prepare_advclone_partition(storage_selected, shrink_space_mb):
                 infomsg=f"A new advclone partition({shrink_space_mb}MB) has been created from {drive_letter}: and mounted to {free_letter}:"
                 logger.info(infomsg)
                 #print(f"从 {drive_letter}: 创建新分区 {shrink_space_mb}MB 挂载到 {free_letter}:\n", out)
+                #重新扫描磁盘，获取advclone分区partiton编号，分配盘符
+                rescan_disks(disk_num)
                 return free_letter
                 
 def mount_EFI(all_disk_list):
@@ -592,7 +635,7 @@ def modify_boot_order(EFImountLTR: str):
     infomsg=f"[STEP1]bcdedit copy bootmgr"
     logger.info(infomsg)
     #print("[STEP1] 复制 bootmgr 启动项")    
-    output = runCmd("bcdedit /copy {bootmgr} /d 'AdvClone'")
+    output = runCmd("bcdedit /copy {bootmgr} /d AdvClone")
     #logger.info(output)
 
     # 用正则提取 {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
@@ -666,14 +709,8 @@ if __name__=="__main__":
         logger.info(infomsg)
         advclone_ltr = prepare_advclone_partition(storage_list, shrink_space_mb)
 
-        #print("[Step]====== 重新扫描磁盘 ====== ")
-        infomsg=f"[Step]====== Rescan disk ======"
-        logger.info(infomsg)
-        for d in all_disks_data:
-            disk=all_disks_data.get(d)
-            disk_num= disk.get('Number')
-            rescan_disks(disk_num)
 
+        
         #print("[Step]====== 再次获取所有磁盘最新信息 ====== ")
         infomsg=f"[Step]====== Get disk information again ======"
         logger.info(infomsg)
@@ -811,11 +848,12 @@ if __name__=="__main__":
         logger.info(infomsg)
         clean_advclone_entries()
         modify_boot_order(EFI_ltr)
-
+        
         #print(f"\n[Step]====== Finish ======\n")
         infomsg=f"\n[Step]====== Finish ======\n"
         logger.info(infomsg)
         sys.exit(0)
+        
     except Exception as e:
         infomsg=f"main ERROR:\n{e}"
         logger.error(infomsg)
